@@ -91,7 +91,7 @@ jobs:
 
         # Get previous version from changelog
         # pre-incremented version not used for consistent changelog with release notes
-        # for example changelog may be rewrited when switch from beta to release
+        # for example changelog may be rewritten when switch from beta to release
         # and remove internal beta changes
         LAST_TAG=$(cat $CHANGELOG_FILE | grep '^## .* ##$' | head -n 2 | tail -n 1 | cut -d ' ' -f 2)
 
