@@ -1,0 +1,52 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: unit-${{ github.ref }}-${{ matrix.python-version }}-${{ matrix.poetry-version }}
+      cancel-in-progress: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry 2.0.0
+        run: |
+          pip install "poetry~=2.0.0"
+
+          # Ensure that Poetry is not upgraded past the version we are testing
+          poetry add "poetry@~2.0.0" --lock
+
+      - name: Install packages
+        run: |
+          poetry install --with dev
+
+      - name: Run docker compose
+        uses: hoverkraft-tech/compose-action@v2.0.1
+        with:
+          compose-file: "./docker/docker-compose.yml"
+          up-flags: "--wait"
+
+      - name: Run tests
+        run: |
+          poetry run pytest tests
