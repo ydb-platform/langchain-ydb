@@ -16,7 +16,7 @@ def test_ydb() -> None:
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
     output = docsearch.similarity_search("foo", k=1)
     assert output == [Document(page_content="foo")]
-    docsearch.drop()
+    # docsearch.drop()
 
 
 @pytest.mark.asyncio
@@ -327,4 +327,119 @@ def test_search_from_retriever_interface_with_filter() -> None:
     output = retriever.invoke("sometext", filter={"page": "1"})
     assert output == [Document(page_content="bar", metadata={"page": "1"})]
 
+    docsearch.drop()
+
+
+def test_batch_insertion() -> None:
+    """Test batch insertion with different batch sizes."""
+    # Create a large number of documents
+    n = 100
+    texts = [f"text_{i}" for i in range(n)]
+    metadatas = [{"index": str(i)} for i in range(n)]
+    
+    # Test with default batch size
+    config = YDBSettings(drop_existing_table=True)
+    config.table = "test_ydb_batch_default"
+    docsearch1 = YDB.from_texts(
+        texts=texts,
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+        metadatas=metadatas,
+    )
+    
+    # Test with small batch size
+    config = YDBSettings(drop_existing_table=True)
+    config.table = "test_ydb_batch_small"
+    docsearch2 = YDB.from_texts(
+        texts=texts,
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+        metadatas=metadatas,
+        batch_size=10,  # Small batch size
+    )
+    
+    # Test with large batch size
+    config = YDBSettings(drop_existing_table=True)
+    config.table = "test_ydb_batch_large"
+    docsearch3 = YDB.from_texts(
+        texts=texts,
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+        metadatas=metadatas,
+        batch_size=n,  # Entire dataset in one batch
+    )
+    
+    # Verify all documents are properly inserted with all batch sizes
+    for i, text in enumerate(texts):
+        # Test default batch size
+        results1 = docsearch1.similarity_search(
+            text, k=1, filter={"index": str(i)}
+        )
+        assert len(results1) == 1
+        assert results1[0].page_content == text
+        assert results1[0].metadata["index"] == str(i)
+        
+        # Test small batch size
+        results2 = docsearch2.similarity_search(
+            text, k=1, filter={"index": str(i)}
+        )
+        assert len(results2) == 1
+        assert results2[0].page_content == text
+        assert results2[0].metadata["index"] == str(i)
+        
+        # Test large batch size
+        results3 = docsearch3.similarity_search(
+            text, k=1, filter={"index": str(i)}
+        )
+        assert len(results3) == 1
+        assert results3[0].page_content == text
+        assert results3[0].metadata["index"] == str(i)
+    
+    # Clean up
+    docsearch1.drop()
+    docsearch2.drop()
+    docsearch3.drop()
+
+
+def test_batch_insertion_with_add_texts() -> None:
+    """Test add_texts with batch insertion."""
+    # Create a vector store
+    config = YDBSettings(drop_existing_table=True)
+    config.table = "test_ydb_add_texts_batch"
+    docsearch = YDB(
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+    )
+    
+    # Add texts in batches
+    n = 50
+    texts = [f"text_{i}" for i in range(n)]
+    metadatas = [{"index": str(i)} for i in range(n)]
+    
+    # Add first half with default batch size
+    ids1 = docsearch.add_texts(
+        texts=texts[:n//2],
+        metadatas=metadatas[:n//2],
+    )
+    
+    # Add second half with custom batch size
+    ids2 = docsearch.add_texts(
+        texts=texts[n//2:],
+        metadatas=metadatas[n//2:],
+        batch_size=5,
+    )
+    
+    # Verify all documents are inserted
+    assert len(ids1) + len(ids2) == n
+    
+    # Test retrieval for all documents
+    for i, text in enumerate(texts):
+        results = docsearch.similarity_search(
+            text, k=1, filter={"index": str(i)}
+        )
+        assert len(results) == 1
+        assert results[0].page_content == text
+        assert results[0].metadata["index"] == str(i)
+    
+    # Clean up
     docsearch.drop()

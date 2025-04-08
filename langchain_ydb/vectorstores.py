@@ -218,10 +218,11 @@ class YDB(VectorStore):
 
     def _prepare_insert_query(self) -> str:
         return f"""
-        DECLARE $id AS Utf8;
-        DECLARE $document as Utf8;
-        DECLARE $embedding as List<Float>;
-        DECLARE $metadata as Json;
+        DECLARE $documents AS List<Struct<
+            id: Utf8,
+            document: Utf8,
+            embedding: List<Float>,
+            metadata: Json>>;
 
         UPSERT INTO `{self.config.table}`
         (
@@ -230,13 +231,12 @@ class YDB(VectorStore):
         {self.config.column_map["embedding"]},
         {self.config.column_map["metadata"]}
         )
-        VALUES
-        (
-        $id,
-        $document,
-        Untag(Knn::ToBinaryStringFloat($embedding), "FloatVector"),
-        $metadata
-        );
+        SELECT
+            id,
+            document,
+            Untag(Knn::ToBinaryStringFloat(embedding), "FloatVector"),
+            metadata
+        FROM AS_TABLE($documents);
         """
 
     def _prepare_search_query(
@@ -285,6 +285,7 @@ class YDB(VectorStore):
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
+        batch_size: int = 100,
         **kwargs: Any,
     ) -> list[str]:
         """Run more texts through the embeddings and add to the vectorstore.
@@ -293,6 +294,7 @@ class YDB(VectorStore):
             texts: Iterable of strings to add to the vectorstore.
             metadatas: Optional list of metadatas associated with the texts.
             ids: Optional list of IDs associated with the texts.
+            batch_size: Number of texts to process in a single batch. Defaults to 100.
             **kwargs: vectorstore specific parameters.
                 One of the kwargs should be `ids` which is a list of ids
                 associated with the texts.
@@ -315,20 +317,43 @@ class YDB(VectorStore):
         metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
 
         ydb = self._ydb_lib
-
-        for id, text, metadata in self.pgbar(
-            zip(ids, texts, metadatas),
-            desc="Inserting data...",
-            total=len(ids),
-        ):
-            embedding = self.embedding_function.embed_query(text)
+        
+        # Define struct type with proper member fields
+        document_struct_type = ydb.StructType()
+        document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member('embedding', ydb.ListType(ydb.PrimitiveType.Float))
+        document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
+        
+        # Process in batches
+        batch_ranges = range(0, len(texts_), batch_size)
+        for i in self.pgbar(batch_ranges, desc="Processing batches...", total=len(batch_ranges)):
+            batch_texts = texts_[i:i+batch_size]
+            batch_ids = ids[i:i+batch_size]
+            batch_metadatas = metadatas[i:i+batch_size]
+            
+            # Generate embeddings for the batch
+            embeddings = [self.embedding_function.embed_query(text) for text in batch_texts]
+            
+            # Create a list of document structs
+            documents = []
+            for doc_id, doc_text, doc_embedding, doc_metadata in zip(
+                batch_ids, batch_texts, embeddings, batch_metadatas
+            ):
+                # Use dictionary format for struct values - YDB will convert them
+                document = {
+                    'id': doc_id,
+                    'document': doc_text,
+                    'embedding': doc_embedding,
+                    'metadata': json.dumps(doc_metadata)
+                }
+                documents.append(document)
+            
+            # Execute the batch insert
             self._execute_query(
                 self._insert_query,
                 {
-                    "$id": id,
-                    "$document": text,
-                    "$embedding": (embedding, ydb.ListType(ydb.PrimitiveType.Float)),
-                    "$metadata": (json.dumps(metadata), ydb.PrimitiveType.Json),
+                    "$documents": (documents, ydb.ListType(document_struct_type))
                 },
             )
 
@@ -343,6 +368,7 @@ class YDB(VectorStore):
         *,
         config: Optional[YDBSettings] = None,
         ids: Optional[list[str]] = None,
+        batch_size: int = 100,
         **kwargs: Any,
     ) -> YDB:
         """Return YDB VectorStore initialized from texts and embeddings.
@@ -353,13 +379,14 @@ class YDB(VectorStore):
             metadatas: Optional list of metadatas associated with the texts.
                 Default is None.
             ids: Optional list of IDs associated with the texts.
+            batch_size: Number of texts to process in a single batch. Defaults to 100.
             kwargs: Additional keyword arguments.
 
         Returns:
             VectorStore: VectorStore initialized from texts and embeddings.
         """
         vs = cls(embedding, config, **kwargs)
-        vs.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+        vs.add_texts(texts=texts, metadatas=metadatas, ids=ids, batch_size=batch_size)
         return vs
 
     def delete(self, ids: Optional[list[str]] = None, **kwargs: Any) -> Optional[bool]:
