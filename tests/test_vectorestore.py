@@ -16,7 +16,7 @@ def test_ydb() -> None:
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
     output = docsearch.similarity_search("foo", k=1)
     assert output == [Document(page_content="foo")]
-    # docsearch.drop()
+    docsearch.drop()
 
 
 @pytest.mark.asyncio
