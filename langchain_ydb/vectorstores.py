@@ -340,7 +340,9 @@ class YDB(VectorStore):
             batch_metadatas = metadatas[i:i+batch_size]
             
             # Generate embeddings for the batch
-            embeddings = self.embedding_function.embed_documents(batch_texts)
+            embeddings = self.embedding_function.embed_documents(
+                batch_texts,  # type: ignore
+            )
             
             # Create a list of document structs
             documents = []
