@@ -328,3 +328,96 @@ def test_search_from_retriever_interface_with_filter() -> None:
     assert output == [Document(page_content="bar", metadata={"page": "1"})]
 
     docsearch.drop()
+
+
+@pytest.mark.parametrize("n", [10, 50, 100])
+def test_batch_insertion(n: int) -> None:
+    """Test batch insertion with different document counts."""
+    # Create documents
+    texts = [f"text_{i}" for i in range(n)]
+    metadatas = [{"index": str(i)} for i in range(n)]
+    
+    # Create vectorstore
+    config = YDBSettings(drop_existing_table=True)
+    config.table = f"test_ydb_batch_{n}"
+    docsearch = YDB.from_texts(
+        texts=texts,
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+        metadatas=metadatas,
+    )
+    
+    # Verify total count matches expected
+    all_results = docsearch.similarity_search("text", k=n + 1)
+    assert len(all_results) == n
+    
+    # Clean up
+    docsearch.drop()
+
+@pytest.mark.parametrize("n,batch_size", [(25, None), (50, 10), (100, 50)])
+def test_batch_insertion_with_add_texts(n: int, batch_size: int) -> None:
+    """Test add_texts with different document counts and batch sizes."""
+    # Setup
+    config = YDBSettings(drop_existing_table=True)
+    config.table = f"test_ydb_add_texts_batch_{n}_{batch_size}"
+    docsearch = YDB(
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+    )
+    
+    # Create test data
+    texts = [f"text_{i}" for i in range(n)]
+    metadatas = [{"index": str(i)} for i in range(n)]
+    
+    # Mock the embedding and execute functions to verify batch behavior
+    with pytest.MonkeyPatch.context() as mp:
+        # Track batches
+        processed_batches = []
+        
+        # Mock embedding function to track batch sizes
+        def mock_embed_documents(texts):
+            processed_batches.append(len(texts))
+            # Return fake embeddings of appropriate length
+            return [[0.1] * 5 for _ in range(len(texts))]
+        
+        # Mock execute query to avoid actual database operations
+        def mock_execute_query(query, params=None, ddl=False):
+            return None
+        
+        # Apply mocks
+        mp.setattr(
+            docsearch.embedding_function, "embed_documents", mock_embed_documents
+        )
+        mp.setattr(docsearch, "_execute_query", mock_execute_query)
+        
+        # Execute add_texts with specified batch size
+        kwargs = {}
+        if batch_size is not None:
+            kwargs["batch_size"] = batch_size
+        
+        ids = docsearch.add_texts(
+            texts=texts,
+            metadatas=metadatas,
+            **kwargs
+        )
+        
+        # Verify results
+        assert len(ids) == n  # Correct number of IDs returned
+        
+        # Verify correct batch sizes were used
+        expected_batch_size = batch_size if batch_size is not None else 32
+        expected_num_batches = (n + expected_batch_size - 1) // expected_batch_size
+        
+        assert len(processed_batches) == expected_num_batches
+        
+        # Verify all texts were processed in total
+        assert sum(processed_batches) == n
+        
+        # Verify most batches are of the expected size (except possibly the last one)
+        for i, batch_size in enumerate(processed_batches):
+            if i < len(processed_batches) - 1:
+                # All but the last batch should be full
+                assert batch_size == expected_batch_size
+            else:
+                # Last batch can be smaller
+                assert batch_size <= expected_batch_size
