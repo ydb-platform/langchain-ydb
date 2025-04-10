@@ -4,6 +4,8 @@ version = "0.0.1"  # AUTOVERSION
 description = "An integration package connecting YDB and LangChain"
 authors = []
 readme = "README.md"
+keywords = ["ydb", "langchain", "database", "AI"]
+repository = "https://github.com/ydb-platform/langchain-ydb"
 requires-python = ">=3.9,<4.0"
 dependencies = [
     "langchain-core (>=0.2.13,<0.4.0)",
