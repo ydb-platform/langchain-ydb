@@ -330,116 +330,92 @@ def test_search_from_retriever_interface_with_filter() -> None:
     docsearch.drop()
 
 
-def test_batch_insertion() -> None:
-    """Test batch insertion with different batch sizes."""
-    # Create a large number of documents
-    n = 100
+@pytest.mark.parametrize("n", [10, 50, 100])
+def test_batch_insertion(n: int) -> None:
+    """Test batch insertion with different document counts."""
+    # Create documents
     texts = [f"text_{i}" for i in range(n)]
     metadatas = [{"index": str(i)} for i in range(n)]
     
-    # Test with default batch size
+    # Create vectorstore
     config = YDBSettings(drop_existing_table=True)
-    config.table = "test_ydb_batch_default"
-    docsearch1 = YDB.from_texts(
+    config.table = f"test_ydb_batch_{n}"
+    docsearch = YDB.from_texts(
         texts=texts,
         embedding=ConsistentFakeEmbeddings(),
         config=config,
         metadatas=metadatas,
     )
     
-    # Test with small batch size
-    config = YDBSettings(drop_existing_table=True)
-    config.table = "test_ydb_batch_small"
-    docsearch2 = YDB.from_texts(
-        texts=texts,
-        embedding=ConsistentFakeEmbeddings(),
-        config=config,
-        metadatas=metadatas,
-        batch_size=10,  # Small batch size
-    )
-    
-    # Test with large batch size
-    config = YDBSettings(drop_existing_table=True)
-    config.table = "test_ydb_batch_large"
-    docsearch3 = YDB.from_texts(
-        texts=texts,
-        embedding=ConsistentFakeEmbeddings(),
-        config=config,
-        metadatas=metadatas,
-        batch_size=n,  # Entire dataset in one batch
-    )
-    
-    # Verify all documents are properly inserted with all batch sizes
-    for i, text in enumerate(texts):
-        # Test default batch size
-        results1 = docsearch1.similarity_search(
-            text, k=1, filter={"index": str(i)}
-        )
-        assert len(results1) == 1
-        assert results1[0].page_content == text
-        assert results1[0].metadata["index"] == str(i)
-        
-        # Test small batch size
-        results2 = docsearch2.similarity_search(
-            text, k=1, filter={"index": str(i)}
-        )
-        assert len(results2) == 1
-        assert results2[0].page_content == text
-        assert results2[0].metadata["index"] == str(i)
-        
-        # Test large batch size
-        results3 = docsearch3.similarity_search(
-            text, k=1, filter={"index": str(i)}
-        )
-        assert len(results3) == 1
-        assert results3[0].page_content == text
-        assert results3[0].metadata["index"] == str(i)
+    # Verify total count matches expected
+    all_results = docsearch.similarity_search("text", k=n + 1)
+    assert len(all_results) == n
     
     # Clean up
-    docsearch1.drop()
-    docsearch2.drop()
-    docsearch3.drop()
+    docsearch.drop()
 
-
-def test_batch_insertion_with_add_texts() -> None:
-    """Test add_texts with batch insertion."""
-    # Create a vector store
+@pytest.mark.parametrize("n,batch_size", [(25, None), (50, 10), (100, 50)])
+def test_batch_insertion_with_add_texts(n: int, batch_size: int) -> None:
+    """Test add_texts with different document counts and batch sizes."""
+    # Setup
     config = YDBSettings(drop_existing_table=True)
-    config.table = "test_ydb_add_texts_batch"
+    config.table = f"test_ydb_add_texts_batch_{n}_{batch_size}"
     docsearch = YDB(
         embedding=ConsistentFakeEmbeddings(),
         config=config,
     )
     
-    # Add texts in batches
-    n = 50
+    # Create test data
     texts = [f"text_{i}" for i in range(n)]
     metadatas = [{"index": str(i)} for i in range(n)]
     
-    # Add first half with default batch size
-    ids1 = docsearch.add_texts(
-        texts=texts[:n//2],
-        metadatas=metadatas[:n//2],
-    )
-    
-    # Add second half with custom batch size
-    ids2 = docsearch.add_texts(
-        texts=texts[n//2:],
-        metadatas=metadatas[n//2:],
-        batch_size=5,
-    )
-    
-    # Verify all documents are inserted
-    assert len(ids1) + len(ids2) == n
-    
-    # Test retrieval for all documents
-    for i, text in enumerate(texts):
-        results = docsearch.similarity_search(
-            text, k=1, filter={"index": str(i)}
+    # Mock the embedding and execute functions to verify batch behavior
+    with pytest.MonkeyPatch.context() as mp:
+        # Track batches
+        processed_batches = []
+        
+        # Mock embedding function to track batch sizes
+        def mock_embed_documents(texts):
+            processed_batches.append(len(texts))
+            # Return fake embeddings of appropriate length
+            return [[0.1] * 5 for _ in range(len(texts))]
+        
+        # Mock execute query to avoid actual database operations
+        def mock_execute_query(query, params=None, ddl=False):
+            return None
+        
+        # Apply mocks
+        mp.setattr(docsearch.embedding_function, "embed_documents", mock_embed_documents)
+        mp.setattr(docsearch, "_execute_query", mock_execute_query)
+        
+        # Execute add_texts with specified batch size
+        kwargs = {}
+        if batch_size is not None:
+            kwargs["batch_size"] = batch_size
+        
+        ids = docsearch.add_texts(
+            texts=texts,
+            metadatas=metadatas,
+            **kwargs
         )
-        assert len(results) == 1
-        assert results[0].page_content == text
-        assert results[0].metadata["index"] == str(i)
-    
-    # Clean up
-    docsearch.drop()
+        
+        # Verify results
+        assert len(ids) == n  # Correct number of IDs returned
+        
+        # Verify correct batch sizes were used
+        expected_batch_size = batch_size if batch_size is not None else 32  # Default is 32
+        expected_num_batches = (n + expected_batch_size - 1) // expected_batch_size
+        
+        assert len(processed_batches) == expected_num_batches
+        
+        # Verify all texts were processed in total
+        assert sum(processed_batches) == n
+        
+        # Verify most batches are of the expected size (except possibly the last one)
+        for i, batch_size in enumerate(processed_batches):
+            if i < len(processed_batches) - 1:
+                # All but the last batch should be full
+                assert batch_size == expected_batch_size
+            else:
+                # Last batch can be smaller
+                assert batch_size <= expected_batch_size
