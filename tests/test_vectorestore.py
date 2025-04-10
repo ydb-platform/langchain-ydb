@@ -385,7 +385,9 @@ def test_batch_insertion_with_add_texts(n: int, batch_size: int) -> None:
             return None
         
         # Apply mocks
-        mp.setattr(docsearch.embedding_function, "embed_documents", mock_embed_documents)
+        mp.setattr(
+            docsearch.embedding_function, "embed_documents", mock_embed_documents
+        )
         mp.setattr(docsearch, "_execute_query", mock_execute_query)
         
         # Execute add_texts with specified batch size
@@ -403,7 +405,7 @@ def test_batch_insertion_with_add_texts(n: int, batch_size: int) -> None:
         assert len(ids) == n  # Correct number of IDs returned
         
         # Verify correct batch sizes were used
-        expected_batch_size = batch_size if batch_size is not None else 32  # Default is 32
+        expected_batch_size = batch_size if batch_size is not None else 32
         expected_num_batches = (n + expected_batch_size - 1) // expected_batch_size
         
         assert len(processed_batches) == expected_num_batches
