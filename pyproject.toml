@@ -1,6 +1,6 @@
 [project]
 name = "langchain-ydb"
-version = "0.0.1"  # AUTOVERSION
+version = "0.0.2"  # AUTOVERSION
 description = "An integration package connecting YDB and LangChain"
 authors = []
 readme = "README.md"
