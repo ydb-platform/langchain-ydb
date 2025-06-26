@@ -9,7 +9,8 @@ class FakeEmbeddings(Embeddings):
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Return simple embeddings.
         Embeddings encode each text as its index."""
-        return [[float(1.0)] * 9 + [float(i)] for i in range(len(texts))]
+        return [[float(0.0)] * (i-1) + [float(1.0)] +
+            [float(0.0)] * (9-i) for i in range(len(texts))]
 
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         return self.embed_documents(texts)
@@ -19,7 +20,7 @@ class FakeEmbeddings(Embeddings):
         Embeddings are identical to embed_documents(texts)[0].
         Distance to each text will be that text's index,
         as it was passed to embed_documents."""
-        return [float(1.0)] * 9 + [float(0.0)]
+        return [float(1.0)] + [float(0.0)] * 9
 
     async def aembed_query(self, text: str) -> List[float]:
         return self.embed_query(text)
@@ -39,9 +40,8 @@ class ConsistentFakeEmbeddings(FakeEmbeddings):
         for text in texts:
             if text not in self.known_texts:
                 self.known_texts.append(text)
-            vector = [float(1.0)] * (self.dimensionality - 1) + [
-                float(self.known_texts.index(text))
-            ]
+            vector = [float(0.0)] * self.dimensionality
+            vector[self.known_texts.index(text) % self.dimensionality] = float(1.0)
             out_vectors.append(vector)
         return out_vectors
 
