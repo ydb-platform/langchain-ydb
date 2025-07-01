@@ -1,7 +1,7 @@
 version: "3.3"
 services:
   ydb:
-    image: ydbplatform/local-ydb:24.3.13.12
+    image: ydbplatform/local-ydb:trunk
     restart: always
     ports:
       - "2136:2136"
@@ -9,3 +9,4 @@ services:
     environment:
       - YDB_USE_IN_MEMORY_PDISKS=true
       - YDB_ENABLE_COLUMN_TABLES=true
+      - YDB_FEATURE_FLAGS=enable_vector_index
