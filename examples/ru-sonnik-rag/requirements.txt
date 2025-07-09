@@ -1,0 +1,5 @@
+python-telegram-bot
+langchain-community
+langchain-ydb
+yandexcloud
+python-dotenv
