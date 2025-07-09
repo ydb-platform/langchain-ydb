@@ -50,7 +50,7 @@ class YDBSettings:
         password (str) : Password to login. Defaults to None.
         secure (bool) : Connect to server over secure connection. Defaults to False.
         database (str) : Database name to find the table. Defaults to '/local'.
-        table (str) : Table name to operate on. Defaults to 'langchain_store'.
+        table (str) : Table name to operate on. Defaults to 'ydb_langchain_store'.
         column_map (Dict) : Column type map to project column name onto langchain
                             semantics. Must have keys: `text`, `id`, `vector`,
                             must be same size to number of columns. For example:
@@ -69,6 +69,13 @@ class YDBSettings:
                          'CosineDistance', 'ManhattanDistance',
                          'EuclideanDistance'). Defaults to 'CosineSimilarity'.
                          Enum `YDBSearchStrategy` contains all of them.
+        index_enabled (bool) : Enables usage of vector index. Default is False.
+        index_name (str) : Name of vector index. Default is 'ydb_vector_index'.
+        index_config_levels (int) : The number of levels in the tree, which determines
+                                    the search depth (recommended 1–3). Default is 2.
+        index_config_clusters (int) : The number of clusters in k-means, which defines
+                                      the search breadth (recommended 64–512).
+                                      Default is 128.
         drop_existing_table (bool) : Flag to drop existing table while init.
                                      Defaults to False.
     """
@@ -82,11 +89,17 @@ class YDBSettings:
     secure: bool = False
 
     database: str = "/local"
-    table: str = "langchain_store"
+    table: str = "ydb_langchain_store"
 
     column_map: Dict[str, str] = field(default_factory=_get_default_column_map_dict)
 
     strategy: str = DEFAULT_SEARCH_STRATEGY
+
+
+    index_enabled: bool = False
+    index_name: str = "ydb_vector_index"
+    index_config_levels: int = 2
+    index_config_clusters: int = 128
 
     drop_existing_table: bool = False
 
@@ -164,6 +177,8 @@ class YDB(VectorStore):
 
         self._insert_query = self._prepare_insert_query()
 
+        self._add_index_query = self._prepare_add_index_query()
+
     @property
     def embeddings(self) -> Optional[Embeddings]:
         """Access the query embedding object if available."""
@@ -216,6 +231,54 @@ class YDB(VectorStore):
             [ch if ch not in chars_to_escape else escape + ch for ch in text]
         )
 
+    def _get_index_strategy(self) -> str:
+        if self.config.strategy == YDBSearchStrategy.COSINE_SIMILARITY:
+            return "similarity=cosine"
+        if self.config.strategy == YDBSearchStrategy.INNER_PRODUCT_SIMILARITY:
+            return "similarity=inner_product"
+        if self.config.strategy == YDBSearchStrategy.COSINE_DISTANCE:
+            return "distance=cosine"
+        if self.config.strategy == YDBSearchStrategy.EUCLIDEAN_DISTANCE:
+            return "distance=euclidean"
+        if self.config.strategy == YDBSearchStrategy.MANHATTAN_DISTANCE:
+            return "distance=manhattan"
+        raise ValueError(f"Unsupported strategy: {self.config.strategy}")
+
+
+    def _prepare_add_index_query(self) -> str:
+
+        vector_dim = len(self.embedding_function.embed_query("index"))
+        return f"""
+        ALTER TABLE `{self.config.table}`
+        ADD INDEX {self.config.index_name}__temp
+        GLOBAL USING vector_kmeans_tree
+        ON ({self.config.column_map["embedding"]})
+        WITH (
+            {self._get_index_strategy()},
+            vector_type="Float",
+            vector_dimension={vector_dim},
+            levels={self.config.index_config_levels},
+            clusters={self.config.index_config_clusters}
+        );
+        """
+
+    def update_vector_index_if_needed(self) -> None:
+        if not self.config.index_enabled:
+            return
+
+        query = self._prepare_add_index_query()
+        self._execute_query(query, ddl=True)
+        self.connection._driver.table_client.alter_table(
+            f"{self.config.database}/{self.config.table}",
+            rename_indexes=[
+                self._ydb_lib.RenameIndexItem(
+                    source_name=f"{self.config.index_name}__temp",
+                    destination_name=f"{self.config.index_name}",
+                    replace_destination=True,
+                ),
+            ],
+        )
+
     def _prepare_insert_query(self) -> str:
         return f"""
         DECLARE $documents AS List<Struct<
@@ -246,6 +309,9 @@ class YDB(VectorStore):
     ) -> str:
         where_statement = ""
         if filter:
+            if self.config.index_enabled:
+                raise ValueError("Unable to use filter with enabled vector index.")
+
             where_statement = "WHERE "
             metadata_col = self.config.column_map["metadata"]
             stmts = []
@@ -257,6 +323,10 @@ class YDB(VectorStore):
         strategy = self.config.strategy
         embedding_col = self.config.column_map["embedding"]
 
+        view_index = ""
+        if self.config.index_enabled:
+            view_index = f"VIEW {self.config.index_name}"
+
         return f"""
         DECLARE $embedding as List<Float>;
 
@@ -267,7 +337,8 @@ class YDB(VectorStore):
             {self.config.column_map["document"]} as document,
             {self.config.column_map["metadata"]} as metadata,
         Knn::{strategy}({embedding_col}, $TargetEmbedding) as score
-        FROM {self.config.table} {where_statement}
+        FROM {self.config.table} {view_index}
+        {where_statement}
         ORDER BY score
         {self.sort_order}
         LIMIT {k};
@@ -317,33 +388,33 @@ class YDB(VectorStore):
         metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
 
         ydb = self._ydb_lib
-        
+
         # Define struct type with proper member fields
         document_struct_type = ydb.StructType()
         document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
         document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
         document_struct_type.add_member(
-            'embedding', 
+            'embedding',
             ydb.ListType(ydb.PrimitiveType.Float)
         )
         document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
-        
+
         # Process in batches
         batch_ranges = range(0, len(texts_), batch_size)
         for i in self.pgbar(
-            batch_ranges, 
-            desc="Processing batches...", 
+            batch_ranges,
+            desc="Processing batches...",
             total=len(batch_ranges)
         ):
             batch_texts = texts_[i:i+batch_size]
             batch_ids = ids[i:i+batch_size]
             batch_metadatas = metadatas[i:i+batch_size]
-            
+
             # Generate embeddings for the batch
             embeddings = self.embedding_function.embed_documents(
                 batch_texts,  # type: ignore
             )
-            
+
             # Create a list of document structs
             documents = []
             for doc_id, doc_text, doc_embedding, doc_metadata in zip(
@@ -357,7 +428,7 @@ class YDB(VectorStore):
                     'metadata': json.dumps(doc_metadata)
                 }
                 documents.append(document)
-            
+
             # Execute the batch insert
             self._execute_query(
                 self._insert_query,
@@ -365,6 +436,8 @@ class YDB(VectorStore):
                     "$documents": (documents, ydb.ListType(document_struct_type))
                 },
             )
+
+        self.update_vector_index_if_needed()
 
         return ids
 
