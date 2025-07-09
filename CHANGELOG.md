@@ -1,3 +1,5 @@
+* Vector Indexes
+
 ## 0.0.2 ##
 * Add support for batch document insertion to YDB (#7)
 
