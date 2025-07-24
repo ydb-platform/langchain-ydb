@@ -24,6 +24,9 @@ ruff = "^0.11.2"
 mypy = "^1.15.0"
 pytest-asyncio = "^0.26.0"
 
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = ["examples"]
 
 [tool.ruff.lint]
 select = [
