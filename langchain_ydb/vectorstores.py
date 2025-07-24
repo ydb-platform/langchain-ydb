@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 
 class YDBSearchStrategy(str, enum.Enum):
@@ -266,6 +266,8 @@ class YDB(VectorStore):
         if not self.config.index_enabled:
             return
 
+        logger.info("Updating vector index...")
+
         query = self._prepare_add_index_query()
         self._execute_query(query, ddl=True)
         self.connection._driver.table_client.alter_table(
@@ -278,6 +280,9 @@ class YDB(VectorStore):
                 ),
             ],
         )
+
+        logger.info("Vector index updated")
+
 
     def _prepare_insert_query(self) -> str:
         return f"""
@@ -350,19 +355,21 @@ class YDB(VectorStore):
             query += f" WHERE {self.config.column_map['id']} IN {str(ids)}"
         return query
 
-    def add_texts(
+    def add_embeddings(
         self,
         texts: Iterable[str],
+        embeddings: list[list[float]],
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
         **kwargs: Any,
     ) -> list[str]:
-        """Run more texts through the embeddings and add to the vectorstore.
+        """Add prepared embeddings to the vectorstore.
 
         Args:
             texts: Iterable of strings to add to the vectorstore.
+            embeddings: List of embedding vectors.
             metadatas: Optional list of metadatas associated with the texts.
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
@@ -409,16 +416,12 @@ class YDB(VectorStore):
             batch_texts = texts_[i:i+batch_size]
             batch_ids = ids[i:i+batch_size]
             batch_metadatas = metadatas[i:i+batch_size]
-
-            # Generate embeddings for the batch
-            embeddings = self.embedding_function.embed_documents(
-                batch_texts,  # type: ignore
-            )
+            batch_embeddings = embeddings[i:i+batch_size]
 
             # Create a list of document structs
             documents = []
             for doc_id, doc_text, doc_embedding, doc_metadata in zip(
-                batch_ids, batch_texts, embeddings, batch_metadatas
+                batch_ids, batch_texts, batch_embeddings, batch_metadatas
             ):
                 # Use dictionary format for struct values - YDB will convert them
                 document = {
@@ -440,6 +443,44 @@ class YDB(VectorStore):
         self.update_vector_index_if_needed()
 
         return ids
+
+
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: Optional[list[dict]] = None,
+        *,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Run more texts through the embeddings and add to the vectorstore.
+
+        Args:
+            texts: Iterable of strings to add to the vectorstore.
+            metadatas: Optional list of metadatas associated with the texts.
+            ids: Optional list of IDs associated with the texts.
+            batch_size: Number of texts to process in a single batch. Defaults to 32.
+            **kwargs: vectorstore specific parameters.
+                One of the kwargs should be `ids` which is a list of ids
+                associated with the texts.
+
+        Returns:
+            List of ids from adding the texts into the vectorstore.
+        """
+
+        texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
+
+        embeddings = self.embedding_function.embed_documents(texts_) # type: ignore
+
+        return self.add_embeddings(
+            texts=texts_,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids,
+            batch_size=batch_size,
+            **kwargs,
+        )
 
     @classmethod
     def from_texts(
