@@ -42,13 +42,71 @@ from langchain_ydb.vectorstores import YDB, YDBSearchStrategy, YDBSettings
 
 
 settings = YDBSettings(
+    host="localhost",
+    port=2136,
+    database="/local",
     table="ydb_example",
     strategy=YDBSearchStrategy.COSINE_SIMILARITY,
 )
+
 vector_store = YDB(
     OpenAIEmbeddings(),
     config=settings,
 )
+```
+
+#### How to use Credentials
+
+To use `YDB` credentials you have to use `credentials` arg during vector store creation.
+
+There are several ways to use credentials:
+
+**Static Credentials**:
+
+```python
+credentials = {"username": "name", "password": "pass"}
+
+vector_store = YDB(embeddings, config=settings, credentials=credentials)
+```
+
+**Access Token Credentials**:
+
+```python
+credentials = {"token": "zxc123"}
+
+vector_store = YDB(embeddings, config=settings, credentials=credentials)
+```
+
+**Service Account Credentials**:
+
+```python
+credentials = {
+    "service_account_json": {
+        "id": "...",
+        "service_account_id": "...",
+        "created_at": "...",
+        "key_algorithm": "...",
+        "public_key": "...",
+        "private_key": "..."
+    }
+}
+
+vector_store = YDB(embeddings, config=settings, credentials=credentials)
+```
+
+**Credentials Object From YDB SDK**:
+
+Additionally, you can use any credentials that comes with `ydb` package. Example:
+
+```python
+import ydb.iam
+
+vector_store = YDB(
+    embeddings,
+    config=settings,
+    credentials=ydb.iam.MetadataUrlCredentials(),
+)
+
 ```
 
 ### Add items to vector store
