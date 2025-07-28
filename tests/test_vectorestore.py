@@ -376,12 +376,11 @@ def test_batch_insertion_with_add_texts(n: int, batch_size: int) -> None:
 
         # Mock embedding function to track batch sizes
         def mock_embed_documents(texts):
-            processed_batches.append(len(texts))
-            # Return fake embeddings of appropriate length
             return [[0.1] * 5 for _ in range(len(texts))]
 
         # Mock execute query to avoid actual database operations
         def mock_execute_query(query, params=None, ddl=False):
+            processed_batches.append(len(params["$documents"][0]))
             return None
 
         # Apply mocks
