@@ -1,3 +1,4 @@
+## 0.0.4 ##
 * Ability to pass vectors as bytes
 
 ## 0.0.3 ##
