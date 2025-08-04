@@ -3,10 +3,13 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import struct
 from dataclasses import dataclass, field
 from hashlib import sha1
 from typing import Any, Dict, Iterable, List, Optional
 
+import ydb
+import ydb_dbapi
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
@@ -78,6 +81,8 @@ class YDBSettings:
                                       Default is 128.
         drop_existing_table (bool) : Flag to drop existing table while init.
                                      Defaults to False.
+        vector_pass_as_bytes (bool) : Flag to pass vectors as bytes to YDB.
+                                      Defaults to True.
     """
 
     host: str = "localhost"
@@ -102,6 +107,7 @@ class YDBSettings:
     index_config_clusters: int = 128
 
     drop_existing_table: bool = False
+    vector_pass_as_bytes: bool = True
 
 
 class YDB(VectorStore):
@@ -123,16 +129,6 @@ class YDB(VectorStore):
             config (YDBSettings): Configuration to YDB DBAPI
             kwargs (any): Other keyword arguments will pass into ydb-dbapi
         """
-        try:
-            import ydb
-            import ydb_dbapi
-
-            self._ydb_lib = ydb
-        except ImportError:
-            raise ImportError(
-                "Could not import ydb-dbapi python package. "
-                "Please install it with `pip install ydb-dbapi`."
-            )
 
         try:
             from tqdm import tqdm
@@ -183,6 +179,24 @@ class YDB(VectorStore):
     def embeddings(self) -> Optional[Embeddings]:
         """Access the query embedding object if available."""
         return self.embedding_function
+
+    def _convert_vector_to_bytes_if_needed(
+        self, vector: list[float]
+    ) -> bytes | list[float]:
+        if self.config.vector_pass_as_bytes:
+            b = struct.pack("f" * len(vector), *vector)
+            return b + b'\x01'
+        return vector
+
+    def _get_vector_type(self) -> str:
+        if self.config.vector_pass_as_bytes:
+            return "String"
+        return "List<Float>"
+
+    def _get_sdk_vector_type(self) -> ydb.PrimitiveType | ydb.ListType:
+        if self.config.vector_pass_as_bytes:
+            return ydb.PrimitiveType.String
+        return ydb.ListType(ydb.PrimitiveType.Float)
 
     def _execute_query(
         self,
@@ -271,7 +285,7 @@ class YDB(VectorStore):
         self.connection._driver.table_client.alter_table(
             f"{self.config.database}/{self.config.table}",
             rename_indexes=[
-                self._ydb_lib.RenameIndexItem(
+                ydb.RenameIndexItem(
                     source_name=f"{self.config.index_name}__temp",
                     destination_name=f"{self.config.index_name}",
                     replace_destination=True,
@@ -280,11 +294,14 @@ class YDB(VectorStore):
         )
 
     def _prepare_insert_query(self) -> str:
+        embedding_select = "embedding" if self.config.vector_pass_as_bytes \
+             else "Untag(Knn::ToBinaryStringFloat(embedding), 'FloatVector')"
+
         return f"""
         DECLARE $documents AS List<Struct<
             id: Utf8,
             document: Utf8,
-            embedding: List<Float>,
+            embedding: {self._get_vector_type()},
             metadata: Json>>;
 
         UPSERT INTO `{self.config.table}`
@@ -297,7 +314,7 @@ class YDB(VectorStore):
         SELECT
             id,
             document,
-            Untag(Knn::ToBinaryStringFloat(embedding), "FloatVector"),
+            {embedding_select},
             metadata
         FROM AS_TABLE($documents);
         """
@@ -327,10 +344,21 @@ class YDB(VectorStore):
         if self.config.index_enabled:
             view_index = f"VIEW {self.config.index_name}"
 
-        return f"""
-        DECLARE $embedding as List<Float>;
+        if self.config.vector_pass_as_bytes:
+            declare_embedding = """
+            DECLARE $embedding as String;
 
-        $TargetEmbedding = Knn::ToBinaryStringFloat($embedding);
+            $TargetEmbedding = $embedding;
+            """
+        else:
+            declare_embedding = """
+            DECLARE $embedding as List<Float>;
+
+            $TargetEmbedding = Knn::ToBinaryStringFloat($embedding);
+            """
+
+        return f"""
+        {declare_embedding}
 
         SELECT
             {self.config.column_map["id"]} as id,
@@ -387,15 +415,13 @@ class YDB(VectorStore):
 
         metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
 
-        ydb = self._ydb_lib
-
         # Define struct type with proper member fields
         document_struct_type = ydb.StructType()
         document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
         document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
         document_struct_type.add_member(
             'embedding',
-            ydb.ListType(ydb.PrimitiveType.Float)
+            self._get_sdk_vector_type()
         )
         document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
 
@@ -424,7 +450,7 @@ class YDB(VectorStore):
                 document = {
                     'id': doc_id,
                     'document': doc_text,
-                    'embedding': doc_embedding,
+                    'embedding': self._convert_vector_to_bytes_if_needed(doc_embedding),
                     'metadata': json.dumps(doc_metadata)
                 }
                 documents.append(document)
@@ -519,11 +545,16 @@ class YDB(VectorStore):
         Returns:
             List of Documents most similar to the query vector.
         """
-        ydb = self._ydb_lib
+
         query = self._prepare_search_query(k, filter=filter)
         res = self._execute_query(
             query,
-            params={"$embedding": (embedding, ydb.ListType(ydb.PrimitiveType.Float))},
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type()
+                )
+            },
         )
         return [
             Document(
@@ -545,12 +576,17 @@ class YDB(VectorStore):
         Returns:
             List of Tuples of (doc, similarity_score).
         """
-        ydb = self._ydb_lib
+
         embedding = self.embedding_function.embed_query(query)
         query = self._prepare_search_query(k, filter=filter)
         res = self._execute_query(
             query,
-            params={"$embedding": (embedding, ydb.ListType(ydb.PrimitiveType.Float))},
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type()
+                )
+            },
         )
         return [
             (
