@@ -8,13 +8,11 @@ from langchain_ydb.vectorstores import YDB, YDBSearchStrategy, YDBSettings
 from .fake_embeddings import ConsistentFakeEmbeddings
 
 
-@pytest.mark.parametrize("vector_pass_as_bytes", [True, False])
-def test_ydb(vector_pass_as_bytes: bool) -> None:
+def test_ydb() -> None:
     """Test end to end construction and search."""
     texts = ["foo", "bar", "baz"]
     config = YDBSettings(
         drop_existing_table=True,
-        vector_pass_as_bytes=vector_pass_as_bytes,
     )
     config.table = "test_ydb"
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
@@ -24,13 +22,11 @@ def test_ydb(vector_pass_as_bytes: bool) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("vector_pass_as_bytes", [True, False])
-async def test_ydb_async(vector_pass_as_bytes: bool) -> None:
+async def test_ydb_async() -> None:
     """Test end to end construction and search."""
     texts = ["foo", "bar", "baz"]
     config = YDBSettings(
         drop_existing_table=True,
-        vector_pass_as_bytes=vector_pass_as_bytes,
     )
     config.table = "test_ydb_async"
     docsearch = YDB.from_texts(

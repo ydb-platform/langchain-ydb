@@ -55,8 +55,9 @@ class YDBSettings:
         database (str) : Database name to find the table. Defaults to '/local'.
         table (str) : Table name to operate on. Defaults to 'ydb_langchain_store'.
         column_map (Dict) : Column type map to project column name onto langchain
-                            semantics. Must have keys: `text`, `id`, `vector`,
-                            must be same size to number of columns. For example:
+                            semantics. Must have keys: `id`, `document`, `embedding`,
+                            `metadata`, must be same size to number of columns.
+                            For example:
                             .. code-block:: python
 
                                 {
@@ -81,8 +82,6 @@ class YDBSettings:
                                       Default is 128.
         drop_existing_table (bool) : Flag to drop existing table while init.
                                      Defaults to False.
-        vector_pass_as_bytes (bool) : Flag to pass vectors as bytes to YDB.
-                                      Defaults to True.
     """
 
     host: str = "localhost"
@@ -107,7 +106,6 @@ class YDBSettings:
     index_config_clusters: int = 128
 
     drop_existing_table: bool = False
-    vector_pass_as_bytes: bool = True
 
 
 class YDB(VectorStore):
@@ -171,7 +169,13 @@ class YDB(VectorStore):
 
         self._execute_query(self._prepare_scheme_query(), ddl=True)
 
-        self._insert_query = self._prepare_insert_query()
+        self._bulk_upsert_type = (
+            ydb.BulkUpsertColumns()
+            .add_column(self.config.column_map["id"], ydb.PrimitiveType.Utf8)
+            .add_column(self.config.column_map["document"], ydb.PrimitiveType.Utf8)
+            .add_column(self.config.column_map["embedding"], ydb.PrimitiveType.String)
+            .add_column(self.config.column_map["metadata"], ydb.PrimitiveType.Json)
+        )
 
         self._add_index_query = self._prepare_add_index_query()
 
@@ -180,23 +184,18 @@ class YDB(VectorStore):
         """Access the query embedding object if available."""
         return self.embedding_function
 
-    def _convert_vector_to_bytes_if_needed(
+    def _convert_vector_to_bytes(
         self, vector: list[float]
-    ) -> bytes | list[float]:
-        if self.config.vector_pass_as_bytes:
-            b = struct.pack("f" * len(vector), *vector)
-            return b + b'\x01'
-        return vector
+    ) -> bytes:
+        b = struct.pack("f" * len(vector), *vector)
+        return b + b'\x01'
 
-    def _get_vector_type(self) -> str:
-        if self.config.vector_pass_as_bytes:
-            return "String"
-        return "List<Float>"
-
-    def _get_sdk_vector_type(self) -> ydb.PrimitiveType | ydb.ListType:
-        if self.config.vector_pass_as_bytes:
-            return ydb.PrimitiveType.String
-        return ydb.ListType(ydb.PrimitiveType.Float)
+    def _bulk_upsert_documents(self, documents: list[dict]) -> None:
+        self.connection.bulk_upsert(
+            self.config.table,
+            documents,
+            self._bulk_upsert_type,
+        )
 
     def _execute_query(
         self,
@@ -293,32 +292,6 @@ class YDB(VectorStore):
             ],
         )
 
-    def _prepare_insert_query(self) -> str:
-        embedding_select = "embedding" if self.config.vector_pass_as_bytes \
-             else "Untag(Knn::ToBinaryStringFloat(embedding), 'FloatVector')"
-
-        return f"""
-        DECLARE $documents AS List<Struct<
-            id: Utf8,
-            document: Utf8,
-            embedding: {self._get_vector_type()},
-            metadata: Json>>;
-
-        UPSERT INTO `{self.config.table}`
-        (
-        {self.config.column_map["id"]},
-        {self.config.column_map["document"]},
-        {self.config.column_map["embedding"]},
-        {self.config.column_map["metadata"]}
-        )
-        SELECT
-            id,
-            document,
-            {embedding_select},
-            metadata
-        FROM AS_TABLE($documents);
-        """
-
     def _prepare_search_query(
         self,
         k: int,
@@ -344,21 +317,10 @@ class YDB(VectorStore):
         if self.config.index_enabled:
             view_index = f"VIEW {self.config.index_name}"
 
-        if self.config.vector_pass_as_bytes:
-            declare_embedding = """
-            DECLARE $embedding as String;
-
-            $TargetEmbedding = $embedding;
-            """
-        else:
-            declare_embedding = """
-            DECLARE $embedding as List<Float>;
-
-            $TargetEmbedding = Knn::ToBinaryStringFloat($embedding);
-            """
-
         return f"""
-        {declare_embedding}
+        DECLARE $embedding as String;
+
+        $TargetEmbedding = $embedding;
 
         SELECT
             {self.config.column_map["id"]} as id,
@@ -415,16 +377,6 @@ class YDB(VectorStore):
 
         metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
 
-        # Define struct type with proper member fields
-        document_struct_type = ydb.StructType()
-        document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member(
-            'embedding',
-            self._get_sdk_vector_type()
-        )
-        document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
-
         # Process in batches
         batch_ranges = range(0, len(texts_), batch_size)
         for i in self.pgbar(
@@ -448,20 +400,16 @@ class YDB(VectorStore):
             ):
                 # Use dictionary format for struct values - YDB will convert them
                 document = {
-                    'id': doc_id,
-                    'document': doc_text,
-                    'embedding': self._convert_vector_to_bytes_if_needed(doc_embedding),
-                    'metadata': json.dumps(doc_metadata)
+                    self.config.column_map["id"]: doc_id,
+                    self.config.column_map["document"]: doc_text,
+                    self.config.column_map["embedding"]: self._convert_vector_to_bytes(
+                        doc_embedding,
+                    ),
+                    self.config.column_map["metadata"]: json.dumps(doc_metadata)
                 }
                 documents.append(document)
 
-            # Execute the batch insert
-            self._execute_query(
-                self._insert_query,
-                {
-                    "$documents": (documents, ydb.ListType(document_struct_type))
-                },
-            )
+            self._bulk_upsert_documents(documents)
 
         self.update_vector_index_if_needed()
 
@@ -551,8 +499,8 @@ class YDB(VectorStore):
             query,
             params={
                 "$embedding": (
-                    self._convert_vector_to_bytes_if_needed(embedding),
-                    self._get_sdk_vector_type()
+                    self._convert_vector_to_bytes(embedding),
+                    ydb.PrimitiveType.String,
                 )
             },
         )
@@ -583,8 +531,8 @@ class YDB(VectorStore):
             query,
             params={
                 "$embedding": (
-                    self._convert_vector_to_bytes_if_needed(embedding),
-                    self._get_sdk_vector_type()
+                    self._convert_vector_to_bytes(embedding),
+                    ydb.PrimitiveType.String,
                 )
             },
         )
