@@ -1,3 +1,5 @@
+* Fix tree search param naming
+
 ## 0.0.6 ##
 * KMeansTreeSearchTopSize pragma configuration param
 
