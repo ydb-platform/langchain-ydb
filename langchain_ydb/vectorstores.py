@@ -79,6 +79,8 @@ class YDBSettings:
         index_config_clusters (int) : The number of clusters in k-means, which defines
                                       the search breadth (recommended 64–512).
                                       Default is 128.
+        index_tree_search_top_size (int) : Completeness of the indexed vector search.
+                                           Default is 1.
         drop_existing_table (bool) : Flag to drop existing table while init.
                                      Defaults to False.
         vector_pass_as_bytes (bool) : Flag to pass vectors as bytes to YDB.
@@ -105,6 +107,7 @@ class YDBSettings:
     index_name: str = "ydb_vector_index"
     index_config_levels: int = 2
     index_config_clusters: int = 128
+    index_config_top_size: int = 1
 
     drop_existing_table: bool = False
     vector_pass_as_bytes: bool = True
@@ -345,6 +348,12 @@ class YDB(VectorStore):
         strategy = self.config.strategy
         embedding_col = self.config.column_map["embedding"]
 
+        pragma_statement = ""
+        if self.config.index_enabled:
+            pragma_statement = f"""
+            PRAGMA ydb.KMeansTreeSearchTopSize="{self.config.index_config_top_size}";
+            """
+
         view_index = ""
         if self.config.index_enabled:
             view_index = f"VIEW {self.config.index_name}"
@@ -363,6 +372,8 @@ class YDB(VectorStore):
             """
 
         return f"""
+        {pragma_statement}
+
         {declare_embedding}
 
         SELECT
