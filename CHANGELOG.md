@@ -1,3 +1,4 @@
+## 0.0.6 ##
 * KMeansTreeSearchTopSize pragma configuration param
 
 ## 0.0.5 ##
