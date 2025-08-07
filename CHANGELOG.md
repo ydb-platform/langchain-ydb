@@ -1,3 +1,5 @@
+* KMeansTreeSearchTopSize pragma configuration param
+
 ## 0.0.5 ##
 * Refactor embedding model calls
 
