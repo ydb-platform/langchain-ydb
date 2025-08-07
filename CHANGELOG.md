@@ -1,3 +1,4 @@
+## 0.0.7 ##
 * Fix tree search param naming
 
 ## 0.0.6 ##
