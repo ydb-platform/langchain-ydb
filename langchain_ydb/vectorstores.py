@@ -107,7 +107,7 @@ class YDBSettings:
     index_name: str = "ydb_vector_index"
     index_config_levels: int = 2
     index_config_clusters: int = 128
-    index_config_top_size: int = 1
+    index_tree_search_top_size: int = 1
 
     drop_existing_table: bool = False
     vector_pass_as_bytes: bool = True
@@ -350,8 +350,9 @@ class YDB(VectorStore):
 
         pragma_statement = ""
         if self.config.index_enabled:
+            size = self.config.index_tree_search_top_size
             pragma_statement = f"""
-            PRAGMA ydb.KMeansTreeSearchTopSize="{self.config.index_config_top_size}";
+            PRAGMA ydb.KMeansTreeSearchTopSize="{size}";
             """
 
         view_index = ""
