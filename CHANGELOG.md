@@ -1,3 +1,4 @@
+## 0.0.5 ##
 * Refactor embedding model calls
 
 ## 0.0.4 ##
