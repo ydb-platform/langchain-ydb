@@ -1,3 +1,4 @@
+## 0.0.8 ##
 * Similarity search by vector with score
 
 ## 0.0.7 ##
