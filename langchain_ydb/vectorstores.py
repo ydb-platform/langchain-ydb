@@ -652,6 +652,45 @@ class YDB(VectorStore):
             for row in res
         ]
 
+    def similarity_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        """Return docs most similar to embedding vector.
+
+        Args:
+            embedding: Embedding to look up documents similar to.
+            k: Number of Documents to return. Defaults to 4.
+            **kwargs: Arguments to pass to the search method.
+
+        Returns:
+            List of Documents most similar to the query vector.
+        """
+
+        query = self._prepare_search_query(k, filter=filter)
+        res = self._execute_query(
+            query,
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type()
+                )
+            },
+        )
+        return [
+            (
+                Document(
+                    page_content=row["document"],
+                    metadata=json.loads(row["metadata"]),
+                ),
+                row["score"],
+            )
+            for row in res
+        ]
+
     def drop(self) -> None:
         """
         Helper function: Drop data
