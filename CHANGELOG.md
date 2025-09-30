@@ -1,3 +1,5 @@
+* Similarity search by vector with score
+
 ## 0.0.7 ##
 * Fix tree search param naming
 
