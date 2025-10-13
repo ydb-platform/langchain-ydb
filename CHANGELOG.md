@@ -1,3 +1,5 @@
+* Ability to batch embeddings
+
 ## 0.0.8 ##
 * Similarity search by vector with score
 
