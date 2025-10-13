@@ -1,3 +1,4 @@
+## 0.0.9 ##
 * Ability to batch embeddings
 
 ## 0.0.8 ##
