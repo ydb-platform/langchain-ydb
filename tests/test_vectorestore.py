@@ -338,8 +338,18 @@ def test_search_from_retriever_interface_with_filter() -> None:
     docsearch.drop()
 
 
-@pytest.mark.parametrize("n", [10, 50, 100])
-def test_batch_insertion(n: int) -> None:
+@pytest.mark.parametrize(
+    "n, batch_embeddings",
+    [
+        (10, False),
+        (50, False),
+        (100, False),
+        (10, True),
+        (50, True),
+        (100, True),
+    ]
+)
+def test_batch_insertion(n: int, batch_embeddings: bool) -> None:
     """Test batch insertion with different document counts."""
     # Create documents
     texts = [f"text_{i}" for i in range(n)]
@@ -353,6 +363,7 @@ def test_batch_insertion(n: int) -> None:
         embedding=ConsistentFakeEmbeddings(),
         config=config,
         metadatas=metadatas,
+        batch_embeddings=batch_embeddings,
     )
 
     # Verify total count matches expected

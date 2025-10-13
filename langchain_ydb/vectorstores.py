@@ -178,6 +178,16 @@ class YDB(VectorStore):
 
         self._add_index_query = self._prepare_add_index_query()
 
+        self._batch_ydb_type = self._prepare_document_type()
+
+    def _prepare_document_type(self) -> ydb.ListType:
+        document_struct_type = ydb.StructType()
+        document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member('embedding', self._get_sdk_vector_type())
+        document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
+        return ydb.ListType(document_struct_type)
+
     @property
     def embeddings(self) -> Optional[Embeddings]:
         """Access the query embedding object if available."""
@@ -434,16 +444,6 @@ class YDB(VectorStore):
 
         metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
 
-        # Define struct type with proper member fields
-        document_struct_type = ydb.StructType()
-        document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member(
-            'embedding',
-            self._get_sdk_vector_type()
-        )
-        document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
-
         # Process in batches
         batch_ranges = range(0, len(texts_), batch_size)
         for i in self.pgbar(
@@ -474,7 +474,7 @@ class YDB(VectorStore):
             self._execute_query(
                 self._insert_query,
                 {
-                    "$documents": (documents, ydb.ListType(document_struct_type))
+                    "$documents": (documents, self._batch_ydb_type)
                 },
             )
 
@@ -490,6 +490,7 @@ class YDB(VectorStore):
         *,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
+        batch_embeddings: bool = False,
         **kwargs: Any,
     ) -> list[str]:
         """Run more texts through the embeddings and add to the vectorstore.
@@ -499,6 +500,8 @@ class YDB(VectorStore):
             metadatas: Optional list of metadatas associated with the texts.
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
+            batch_embeddings: If False, embeddings will be calculated
+                              in a single batch. Defaults to False.
             **kwargs: vectorstore specific parameters.
                 One of the kwargs should be `ids` which is a list of ids
                 associated with the texts.
@@ -509,16 +512,69 @@ class YDB(VectorStore):
 
         texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
 
-        embeddings = self.embedding_function.embed_documents(texts_) # type: ignore
+        if not batch_embeddings:
+            embeddings = self.embedding_function.embed_documents(texts_) # type: ignore
 
-        return self.add_embeddings(
-            texts=texts_,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids,
-            batch_size=batch_size,
-            **kwargs,
-        )
+            return self.add_embeddings(
+                texts=texts_,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids,
+                batch_size=batch_size,
+                **kwargs,
+            )
+
+        if ids is None:
+            ids = [sha1(t.encode("utf-8")).hexdigest() for t in texts_]
+
+        if metadatas and len(metadatas) != len(texts_):
+            msg = (
+                "The number of metadatas must match the number of texts."
+                f"Got {len(metadatas)} metadatas and {len(texts_)} texts."
+            )
+            raise ValueError(msg)
+
+        metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
+
+        # Process in batches
+        batch_ranges = range(0, len(texts_), batch_size)
+        for i in self.pgbar(
+            batch_ranges,
+            desc="Processing batches...",
+            total=len(batch_ranges)
+        ):
+            batch_texts = texts_[i:i+batch_size]
+            batch_ids = ids[i:i+batch_size]
+            batch_metadatas = metadatas[i:i+batch_size]
+            batch_embeddings_ = self.embedding_function.embed_documents(batch_texts) # type: ignore
+
+            # Create a list of document structs
+            documents = []
+            for doc_id, doc_text, doc_embedding, doc_metadata in zip(
+                batch_ids, batch_texts, batch_embeddings_, batch_metadatas
+            ):
+                # Use dictionary format for struct values - YDB will convert them
+                document = {
+                    'id': doc_id,
+                    'document': doc_text,
+                    'embedding': self._convert_vector_to_bytes_if_needed(doc_embedding),
+                    'metadata': json.dumps(doc_metadata)
+                }
+                documents.append(document)
+
+            # Execute the batch insert
+            self._execute_query(
+                self._insert_query,
+                {
+                    "$documents": (documents, self._batch_ydb_type)
+                },
+            )
+
+        self.update_vector_index_if_needed()
+
+        return ids
+
+
 
     @classmethod
     def from_texts(
@@ -530,6 +586,7 @@ class YDB(VectorStore):
         config: Optional[YDBSettings] = None,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
+        batch_embeddings: bool = False,
         **kwargs: Any,
     ) -> YDB:
         """Return YDB VectorStore initialized from texts and embeddings.
@@ -541,13 +598,21 @@ class YDB(VectorStore):
                 Default is None.
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
+            batch_embeddings: If False, embeddings will be calculated
+                              in a single batch. Defaults to False.
             kwargs: Additional keyword arguments.
 
         Returns:
             VectorStore: VectorStore initialized from texts and embeddings.
         """
         vs = cls(embedding, config, **kwargs)
-        vs.add_texts(texts=texts, metadatas=metadatas, ids=ids, batch_size=batch_size)
+        vs.add_texts(
+            texts=texts,
+            metadatas=metadatas,
+            ids=ids,
+            batch_size=batch_size,
+            batch_embeddings=batch_embeddings,
+        )
         return vs
 
     def delete(self, ids: Optional[list[str]] = None, **kwargs: Any) -> Optional[bool]:
