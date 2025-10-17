@@ -1,3 +1,6 @@
+* Make batch embeddings flag  true by default
+* Fix custom column name error
+
 ## 0.0.9 ##
 * Ability to batch embeddings
 
