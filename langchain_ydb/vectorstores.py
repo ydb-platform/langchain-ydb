@@ -482,7 +482,6 @@ class YDB(VectorStore):
 
         return ids
 
-
     def add_texts(
         self,
         texts: Iterable[str],
@@ -490,7 +489,7 @@ class YDB(VectorStore):
         *,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
-        batch_embeddings: bool = False,
+        batch_embeddings: bool = True,
         **kwargs: Any,
     ) -> list[str]:
         """Run more texts through the embeddings and add to the vectorstore.
@@ -501,7 +500,7 @@ class YDB(VectorStore):
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
             batch_embeddings: If False, embeddings will be calculated
-                              in a single batch. Defaults to False.
+                              in a single batch. Defaults to True.
             **kwargs: vectorstore specific parameters.
                 One of the kwargs should be `ids` which is a list of ids
                 associated with the texts.
@@ -574,8 +573,6 @@ class YDB(VectorStore):
 
         return ids
 
-
-
     @classmethod
     def from_texts(
         cls,
@@ -586,7 +583,7 @@ class YDB(VectorStore):
         config: Optional[YDBSettings] = None,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
-        batch_embeddings: bool = False,
+        batch_embeddings: bool = True,
         **kwargs: Any,
     ) -> YDB:
         """Return YDB VectorStore initialized from texts and embeddings.
@@ -599,7 +596,7 @@ class YDB(VectorStore):
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
             batch_embeddings: If False, embeddings will be calculated
-                              in a single batch. Defaults to False.
+                              in a single batch. Defaults to True.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -709,7 +706,7 @@ class YDB(VectorStore):
         return [
             (
                 Document(
-                    page_content=row[self.config.column_map["document"]],
+                    page_content=row["document"],
                     metadata=json.loads(row["metadata"]),
                 ),
                 row["score"],
