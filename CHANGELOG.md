@@ -1,3 +1,4 @@
+## 0.0.10 ##
 * Make batch embeddings flag  true by default
 * Fix custom column name error
 
