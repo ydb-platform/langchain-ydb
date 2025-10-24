@@ -675,6 +675,7 @@ class YDB(VectorStore):
             Document(
                 page_content=row["document"],
                 metadata=json.loads(row["metadata"]),
+                id=row["id"],
             )
             for row in res
         ]
@@ -708,6 +709,7 @@ class YDB(VectorStore):
                 Document(
                     page_content=row["document"],
                     metadata=json.loads(row["metadata"]),
+                    id=row["id"],
                 ),
                 row["score"],
             )
@@ -747,6 +749,7 @@ class YDB(VectorStore):
                 Document(
                     page_content=row["document"],
                     metadata=json.loads(row["metadata"]),
+                    id=row["id"],
                 ),
                 row["score"],
             )
