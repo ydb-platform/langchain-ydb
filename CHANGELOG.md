@@ -1,3 +1,4 @@
+## 0.0.11 ##
 * Fix missing id in Document
 
 ## 0.0.10 ##
