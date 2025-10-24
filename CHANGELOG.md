@@ -1,3 +1,5 @@
+* Fix missing id in Document
+
 ## 0.0.10 ##
 * Make batch embeddings flag  true by default
 * Fix custom column name error

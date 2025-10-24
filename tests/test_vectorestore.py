@@ -8,6 +8,15 @@ from langchain_ydb.vectorstores import YDB, YDBSearchStrategy, YDBSettings
 from .fake_embeddings import ConsistentFakeEmbeddings
 
 
+def document_eq(doc1: Document, doc2: Document, check_id: bool = False) -> bool:
+    """Compare two documents, optionally checking the id."""
+    return (
+        doc1.page_content == doc2.page_content
+        and doc1.metadata == doc2.metadata
+        and (not check_id or doc1.id == doc2.id)
+    )
+
+
 @pytest.mark.parametrize("vector_pass_as_bytes", [True, False])
 def test_ydb(vector_pass_as_bytes: bool) -> None:
     """Test end to end construction and search."""
@@ -19,7 +28,7 @@ def test_ydb(vector_pass_as_bytes: bool) -> None:
     config.table = "test_ydb"
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
     docsearch.drop()
 
 
@@ -37,7 +46,7 @@ async def test_ydb_async(vector_pass_as_bytes: bool) -> None:
         texts=texts, embedding=ConsistentFakeEmbeddings(), config=config
     )
     output = await docsearch.asimilarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
     docsearch.drop()
 
 
@@ -56,7 +65,7 @@ def test_ydb_with_custom_column_names() -> None:
     config.table = "test_ydb_custom_col_names"
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
     output = docsearch.similarity_search("bar", k=1)
-    assert output == [Document(page_content="bar")]
+    assert document_eq(output[0], Document(page_content="bar"))
     docsearch.drop()
 
 
@@ -87,7 +96,7 @@ def test_create_ydb_with_metadatas() -> None:
         metadatas=metadatas,
     )
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo", metadata={"page": "0"})]
+    assert document_eq(output[0], Document(page_content="foo", metadata={"page": "0"}))
     docsearch.drop()
 
 
@@ -120,7 +129,7 @@ def test_create_ydb_with_empty_metadatas() -> None:
         metadatas=metadatas,
     )
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
     docsearch.drop()
 
 
@@ -166,6 +175,27 @@ def test_delete() -> None:
     docsearch.drop()
 
 
+def test_id_persistence() -> None:
+    """Test id persistence."""
+    texts = ["foo", "bar", "baz"]
+    ids = ["1", "2", "3"]
+    config = YDBSettings(drop_existing_table=True)
+    config.table = "test_id_persistence"
+    docsearch = YDB.from_texts(
+        texts=texts,
+        embedding=ConsistentFakeEmbeddings(),
+        config=config,
+        ids=ids,
+    )
+    output = docsearch.similarity_search("foo", k=1)
+    assert document_eq(output[0], Document(page_content="foo", id="1"), check_id=True)
+    output = docsearch.similarity_search("bar", k=1)
+    assert document_eq(output[0], Document(page_content="bar", id="2"), check_id=True)
+    output = docsearch.similarity_search("baz", k=1)
+    assert document_eq(output[0], Document(page_content="baz", id="3"), check_id=True)
+    docsearch.drop()
+
+
 def test_delete_with_ids() -> None:
     """Test delete with specified ids."""
     texts = ["foo", "bar", "baz"]
@@ -181,7 +211,7 @@ def test_delete_with_ids() -> None:
     docsearch.delete(ids[:2])
 
     output = docsearch.similarity_search("sometext", k=1)
-    assert output == [Document(page_content="baz")]
+    assert document_eq(output[0], Document(page_content="baz"))
 
     docsearch.drop()
 
@@ -200,13 +230,13 @@ def test_search_with_filter() -> None:
     )
 
     output = docsearch.similarity_search("sometext", filter={"page": "0"}, k=1)
-    assert output == [Document(page_content="foo", metadata={"page": "0"})]
+    assert document_eq(output[0], Document(page_content="foo", metadata={"page": "0"}))
 
     output = docsearch.similarity_search("sometext", filter={"page": "1"}, k=1)
-    assert output == [Document(page_content="bar", metadata={"page": "1"})]
+    assert document_eq(output[0], Document(page_content="bar", metadata={"page": "1"}))
 
     output = docsearch.similarity_search("sometext", filter={"page": "2"}, k=1)
-    assert output == [Document(page_content="baz", metadata={"page": "2"})]
+    assert document_eq(output[0], Document(page_content="baz", metadata={"page": "2"}))
 
     docsearch.drop()
 
@@ -237,7 +267,7 @@ def test_search_with_complex_filter() -> None:
     output = docsearch.similarity_search(
         "sometext", filter={"page": "1", "index": "2"}, k=1
     )
-    assert output == []
+    assert len(output) == 0
 
     docsearch.drop()
 
@@ -267,7 +297,7 @@ def test_different_search_strategies(strategy: YDBSearchStrategy) -> None:
     )
 
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     docsearch.drop()
 
@@ -279,7 +309,7 @@ def test_search_with_score() -> None:
     config.table = "test_ydb"
     docsearch = YDB.from_texts(texts, ConsistentFakeEmbeddings(), config=config)
     output = docsearch.similarity_search_with_score("foo", k=1)
-    assert output[0][0] == Document(page_content="foo")
+    assert document_eq(output[0][0], Document(page_content="foo"))
     docsearch.drop()
 
 
@@ -292,13 +322,13 @@ def test_ydb_with_persistence() -> None:
     embeddings = ConsistentFakeEmbeddings()
     docsearch = YDB.from_texts(texts, embeddings, config=config)
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     config = YDBSettings()
     config.table = "test_ydb_with_persistence"
     docsearch = YDB(embedding=embeddings, config=config)
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     docsearch.drop()
 
@@ -313,7 +343,7 @@ def test_search_from_retriever_interface() -> None:
     retriever = docsearch.as_retriever(search_kwargs={"k": 1})
 
     output = retriever.invoke("foo")
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
     docsearch.drop()
 
 
@@ -333,7 +363,7 @@ def test_search_from_retriever_interface_with_filter() -> None:
     retriever = docsearch.as_retriever(search_kwargs={"k": 1})
 
     output = retriever.invoke("sometext", filter={"page": "1"})
-    assert output == [Document(page_content="bar", metadata={"page": "1"})]
+    assert document_eq(output[0], Document(page_content="bar", metadata={"page": "1"}))
 
     docsearch.drop()
 
@@ -469,7 +499,7 @@ def test_basic_vector_index(strategy: YDBSearchStrategy) -> None:
     )
 
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     docsearch.drop()
 
@@ -489,14 +519,14 @@ def test_reindex() -> None:
     )
 
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     docsearch.add_texts(["qwe", "asd", "zxc"])
 
     output = docsearch.similarity_search("foo", k=1)
-    assert output == [Document(page_content="foo")]
+    assert document_eq(output[0], Document(page_content="foo"))
 
     output = docsearch.similarity_search("zxc", k=1)
-    assert output == [Document(page_content="zxc")]
+    assert document_eq(output[0], Document(page_content="zxc"))
 
     docsearch.drop()
