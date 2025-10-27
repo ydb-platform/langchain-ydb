@@ -1,0 +1,6 @@
+Flask==2.3.3
+Flask-CORS==4.0.0
+langchain-huggingface
+sentence-transformers
+python-dotenv==1.0.0
+-e ../../.

@@ -341,6 +341,7 @@ class YDB(VectorStore):
         self,
         k: int,
         filter: Optional[dict],
+        as_cte: bool = False,
     ) -> str:
         where_statement = ""
         if filter:
@@ -382,12 +383,14 @@ class YDB(VectorStore):
             $TargetEmbedding = Knn::ToBinaryStringFloat($embedding);
             """
 
+        select_stm = "SELECT" if not as_cte else "$vectorSearchResult = SELECT"
+
         return f"""
         {pragma_statement}
 
         {declare_embedding}
 
-        SELECT
+        {select_stm}
             {self.config.column_map["id"]} as id,
             {self.config.column_map["document"]} as document,
             {self.config.column_map["metadata"]} as metadata,
@@ -398,6 +401,68 @@ class YDB(VectorStore):
         {self.sort_order}
         LIMIT {k};
         """
+
+    def _prepare_hybrid_search_query(
+        self,
+        fulltext_index_table_name: str,
+        k: int,
+        filter: Optional[dict],
+        max_missing_tokens_count: int,
+        score_multipliers: list[float]
+    ) -> str:
+
+        vector_search_query = self._prepare_search_query(k, filter, as_cte=True)
+
+        query = f"""
+        {vector_search_query}
+
+        $vectorSearchResultIds = SELECT id from $vectorSearchResult;
+
+        """
+
+        for missing_count in range(max_missing_tokens_count + 1):
+
+            query += f"""
+            $hybridSearchResult{missing_count} = SELECT {self.config.column_map["id"]} as id
+            FROM `{fulltext_index_table_name}`
+            WHERE ydb_token IN $fulltextTokens AND {self.config.column_map["id"]} IN $vectorSearchResultIds
+            GROUP BY {self.config.column_map["id"]}
+            HAVING COUNT(DISTINCT ydb_token) = ListLength($fulltextTokens) - {missing_count};
+
+            """
+
+        query += f"""
+        $unionResult = (
+        """
+        first = True
+        for missing_count, multiplier in zip(range(max_missing_tokens_count + 1), score_multipliers):
+            if not first:
+                query += f"""
+            UNION ALL
+            """
+            first = False
+            query += f"""
+            SELECT id, score * {multiplier} as score
+            FROM $vectorSearchResult WHERE id IN $hybridSearchResult{missing_count}
+            """
+
+        query += f"""
+        );
+
+        $groupedResult = SELECT id, min(score) as score
+        FROM $unionResult
+        GROUP BY id
+        ORDER BY score;
+
+
+        SELECT gr.id as id, vsr.document as document, vsr.metadata as metadata, gr.score as score
+        FROM $groupedResult AS gr
+        JOIN $vectorSearchResult AS vsr
+            ON gr.id = vsr.id
+        ORDER BY score;
+        """
+
+        return query
 
     def _prepare_delete_query(self, ids: Optional[list[str]]) -> str:
         query = f"DELETE FROM {self.config.table}"
@@ -742,6 +807,55 @@ class YDB(VectorStore):
                     self._convert_vector_to_bytes_if_needed(embedding),
                     self._get_sdk_vector_type()
                 )
+            },
+        )
+        return [
+            (
+                Document(
+                    page_content=row["document"],
+                    metadata=json.loads(row["metadata"]),
+                    id=row["id"],
+                ),
+                row["score"],
+            )
+            for row in res
+        ]
+
+    def _hybrid_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        fulltext_tokens: list[str],
+        fulltext_index_table_name: str,
+        max_missing_tokens_count: int = 0,
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        """EXPERIMENTAL: Return docs most similar to embedding vector.
+
+        Args:
+            embedding: Embedding to look up documents similar to.
+            k: Number of Documents to return. Defaults to 4.
+            **kwargs: Arguments to pass to the search method.
+
+        Returns:
+            List of Documents most similar to the query vector.
+        """
+
+        if self.config.strategy.endswith("Similarity"):
+            raise ValueError("Hybrid search supported only for distance strategies")
+
+        score_multipliers = [0.5, 0.75, 0.85]
+
+        query = self._prepare_hybrid_search_query(fulltext_index_table_name, k, filter, max_missing_tokens_count, score_multipliers)
+        res = self._execute_query(
+            query,
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type()
+                ),
+                "$fulltextTokens": (fulltext_tokens, ydb.ListType(ydb.PrimitiveType.Utf8)),
             },
         )
         return [

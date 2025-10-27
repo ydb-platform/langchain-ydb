@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vector vs Hybrid Search Comparison</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            padding: 20px 30px;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            margin: 0;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .search-form {
+            padding: 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 20px;
+        }
+
+        .settings-section {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+
+        .settings-section h3 {
+            margin: 0 0 15px 0;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 8px;
+        }
+
+        .form-actions {
+            text-align: center;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-weight: 500;
+            gap: 10px;
+        }
+
+        .checkbox-control {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkmark {
+            font-weight: 500;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 120px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .results-container {
+            display: flex;
+            min-height: 500px;
+        }
+
+        .results-column {
+            flex: 1;
+            padding: 30px;
+            border-right: 1px solid #e9ecef;
+        }
+
+        .results-column:last-child {
+            border-right: none;
+        }
+
+        .results-column h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .search-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-timing {
+            font-size: 0.9rem;
+            font-weight: 400;
+            color: #666;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .search-icon {
+            width: 24px;
+            height: 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+        }
+
+        .result-item {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            transition: all 0.2s ease;
+        }
+
+        .result-item:hover {
+            background: #f8f9fa;
+            border-color: #dee2e6;
+        }
+
+        .result-content {
+            flex: 1;
+            margin-right: 16px;
+        }
+
+        .result-document {
+            color: #333;
+            line-height: 1.4;
+            font-size: 14px;
+            margin: 0;
+        }
+
+        .result-metadata {
+            color: #666;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .result-score {
+            color: #666;
+            font-size: 12px;
+            font-weight: 500;
+            white-space: nowrap;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4facfe;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px;
+            border: 1px solid #f5c6cb;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+
+        .empty-state-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .select-control {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 16px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .select-control:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+
+        .select-control:disabled {
+            background-color: #f8f9fa;
+            color: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        @media (max-width: 768px) {
+            .results-container {
+                flex-direction: column;
+            }
+
+            .results-column {
+                border-right: none;
+                border-bottom: 1px solid #e9ecef;
+            }
+
+            .results-column:last-child {
+                border-bottom: none;
+            }
+
+            .settings-grid {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>YDB Vector Search</h1>
+        </div>
+
+        <div class="search-form">
+            <form id="searchForm">
+                <div class="form-group">
+                    <label for="query">Search Query:</label>
+                    <input type="text" id="query" name="query" class="form-control"
+                           placeholder="Enter your search query..." required>
+                </div>
+
+                <div class="settings-grid">
+                    <div class="settings-section">
+                        <h3>Settings</h3>
+                        <div class="form-group">
+                            <label for="k">Number of results (k):</label>
+                            <input type="number" id="k" name="k" class="form-control"
+                                   value="10" min="1" max="100">
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3>Hybrid Search Settings</h3>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="hybridEnabled" name="hybridEnabled" class="checkbox-control">
+                                <span class="checkmark"></span>
+                                Enable Hybrid Search
+                            </label>
+                        </div>
+                        <div class="form-group" id="hybridOptions">
+                            <label for="maxMissingTokens">Max Missing Tokens:</label>
+                            <select id="maxMissingTokens" name="maxMissingTokens" class="select-control" disabled>
+                                <option value="0">0</option>
+                                <option value="1" selected>1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn" id="searchBtn">
+                        🔍 Search
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <div class="results-container">
+            <div class="results-column">
+                <h2>
+                    <div class="search-title">
+                        <div class="search-icon">V</div>
+                        Vector Search
+                    </div>
+                    <div class="search-timing" id="vectorTiming"></div>
+                </h2>
+                <div id="vectorResults">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎯</div>
+                        <p>Enter a search query to see vector search results</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="results-column">
+                <h2>
+                    <div class="search-title">
+                        <div class="search-icon">H</div>
+                        Hybrid Search
+                    </div>
+                    <div class="search-timing" id="hybridTiming"></div>
+                </h2>
+                <div id="hybridResults">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔗</div>
+                        <p>Enter a search query to see hybrid search results</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Обработчик изменения состояния чекбокса гибридного поиска
+        document.getElementById('hybridEnabled').addEventListener('change', function() {
+            const maxMissingTokensSelect = document.getElementById('maxMissingTokens');
+            maxMissingTokensSelect.disabled = !this.checked;
+        });
+
+        // Загружаем параметры из URL при загрузке страницы
+        window.addEventListener('load', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const query = urlParams.get('q');
+            const k = urlParams.get('k');
+            const hybridEnabled = urlParams.get('hybrid_enabled');
+            const maxMissingTokens = urlParams.get('max_missing_tokens');
+
+            if (query) {
+                document.getElementById('query').value = query;
+            }
+            if (k) {
+                document.getElementById('k').value = k;
+            }
+            if (hybridEnabled === 'true') {
+                document.getElementById('hybridEnabled').checked = true;
+                document.getElementById('maxMissingTokens').disabled = false;
+            }
+            if (maxMissingTokens) {
+                document.getElementById('maxMissingTokens').value = maxMissingTokens;
+            }
+
+            // Если есть параметр запроса, автоматически выполняем поиск
+            if (query) {
+                performSearch();
+            }
+        });
+
+        document.getElementById('searchForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            performSearch();
+        });
+
+        async function performSearch() {
+            const query = document.getElementById('query').value.trim();
+            const k = parseInt(document.getElementById('k').value);
+            const hybridEnabled = document.getElementById('hybridEnabled').checked;
+            const maxMissingTokens = parseInt(document.getElementById('maxMissingTokens').value);
+
+            if (!query) {
+                alert('Please enter a search query');
+                return;
+            }
+
+            // Обновляем URL с параметрами поиска
+            const params = new URLSearchParams();
+            params.set('q', query);
+            params.set('k', k.toString());
+            params.set('hybrid_enabled', hybridEnabled.toString());
+            if (hybridEnabled) {
+                params.set('max_missing_tokens', maxMissingTokens.toString());
+            }
+
+            const newUrl = window.location.pathname + '?' + params.toString();
+            window.history.pushState({}, '', newUrl);
+
+            const searchBtn = document.getElementById('searchBtn');
+            const vectorResults = document.getElementById('vectorResults');
+            const hybridResults = document.getElementById('hybridResults');
+            const vectorTiming = document.getElementById('vectorTiming');
+            const hybridTiming = document.getElementById('hybridTiming');
+
+            // Show loading state
+            searchBtn.disabled = true;
+            searchBtn.textContent = '🔄 Searching...';
+
+            const loadingHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Searching...</p>
+                </div>
+            `;
+
+            vectorResults.innerHTML = loadingHTML;
+            hybridResults.innerHTML = loadingHTML;
+            vectorTiming.textContent = '';
+            hybridTiming.textContent = '';
+
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        k: k,
+                        hybrid_enabled: hybridEnabled,
+                        max_missing_tokens: maxMissingTokens
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Search failed');
+                }
+
+                // Display results
+                vectorResults.innerHTML = formatResults(data.vector_search);
+
+                if (hybridEnabled && data.hybrid_search) {
+                    hybridResults.innerHTML = formatResults(data.hybrid_search);
+                } else {
+                    hybridResults.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">⚙️</div>
+                            <p>Hybrid search is disabled. Enable it in settings to see results.</p>
+                        </div>
+                    `;
+                }
+
+                // Display timing information
+                if (data.timing) {
+                    vectorTiming.textContent = `${data.timing.vector_time}ms`;
+                    if (hybridEnabled && data.timing.hybrid_time !== undefined) {
+                        hybridTiming.textContent = `${data.timing.hybrid_time}ms`;
+                    } else {
+                        hybridTiming.textContent = '';
+                    }
+                }
+
+            } catch (error) {
+                console.error('Search error:', error);
+                const errorHTML = `<div class="error">Error: ${error.message}</div>`;
+                vectorResults.innerHTML = errorHTML;
+                hybridResults.innerHTML = errorHTML;
+            } finally {
+                searchBtn.disabled = false;
+                searchBtn.textContent = '🔍 Search';
+            }
+        }
+
+        function formatResults(results) {
+            if (!results || results.length === 0) {
+                return `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📭</div>
+                        <p>No results found</p>
+                    </div>
+                `;
+            }
+
+            return results.map(result => `
+                <div class="result-item">
+                    <div class="result-content">
+                        <div class="result-document">${escapeHtml(result.document)}</div>
+                        ${Object.keys(result.metadata).length > 0 ?
+                            `<div class="result-metadata">
+                                ${Object.entries(result.metadata).map(([key, value]) =>
+                                    `${escapeHtml(key)}: ${escapeHtml(String(value))}`
+                                ).join(' • ')}
+                            </div>` : ''
+                        }
+                    </div>
+                    <div class="result-score">${result.score.toFixed(4)}</div>
+                </div>
+            `).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Auto-focus on query input
+        document.getElementById('query').focus();
+    </script>
+</body>
+</html>
