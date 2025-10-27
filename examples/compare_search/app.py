@@ -78,7 +78,7 @@ def index():
 def search():
     try:
         data = request.get_json()
-        query: str = data.get('query', '')
+        query: str = data.get('query', '').lower()
         k = int(data.get('k', 10))
         hybrid_enabled = data.get('hybrid_enabled', False)
         max_missing_tokens = int(data.get('max_missing_tokens', 1))
