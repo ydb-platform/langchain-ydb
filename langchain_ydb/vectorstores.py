@@ -433,15 +433,12 @@ class YDB(VectorStore):
 
         query += f"""
         $unionResult = (
+        SELECT id, score AS score
+        FROM $vectorSearchResult
         """
-        first = True
         for missing_count, multiplier in zip(range(max_missing_tokens_count + 1), score_multipliers):
-            if not first:
-                query += f"""
+            query += """
             UNION ALL
-            """
-            first = False
-            query += f"""
             SELECT id, score * {multiplier} as score
             FROM $vectorSearchResult WHERE id IN $hybridSearchResult{missing_count}
             """
