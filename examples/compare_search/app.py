@@ -129,7 +129,8 @@ def search():
             'vector_search': format_results(vector_results),
             'timing': {
                 'vector_time': round(vector_time * 1000, 1),  # в миллисекундах
-            }
+            },
+            'embedding_vector': query_embedding  # добавляем вектор для логирования
         }
 
         # Добавляем результаты гибридного поиска только если он был включен

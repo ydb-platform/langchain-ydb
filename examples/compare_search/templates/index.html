@@ -515,6 +515,16 @@
                     throw new Error(data.error || 'Search failed');
                 }
 
+                // Логируем полученный вектор эмбеддингов (для копирования)
+                if (data.embedding_vector) {
+                    console.log('🔍 Query:', query);
+                    console.log('📊 Dimensions:', data.embedding_vector.length);
+
+                    // Выводим вектор в формате, удобном для копирования
+                    console.log('📋 Vector (copy-ready):');
+                    console.log(JSON.stringify(data.embedding_vector));
+                }
+
                 // Display results
                 vectorResults.innerHTML = formatResults(data.vector_search);
 
