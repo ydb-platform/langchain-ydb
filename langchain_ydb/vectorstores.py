@@ -437,7 +437,7 @@ class YDB(VectorStore):
         FROM $vectorSearchResult
         """
         for missing_count, multiplier in zip(range(max_missing_tokens_count + 1), score_multipliers):
-            query += """
+            query += f"""
             UNION ALL
             SELECT id, score * {multiplier} as score
             FROM $vectorSearchResult WHERE id IN $hybridSearchResult{missing_count}
