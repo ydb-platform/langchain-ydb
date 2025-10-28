@@ -413,20 +413,35 @@ class YDB(VectorStore):
 
         vector_search_query = self._prepare_search_query(k, filter, as_cte=True)
 
+        token_prepare_query = """
+        $fulltextTokens = ListMap($rawTokens, ($t) -> { RETURN AsStruct($t AS ydb_token); });
+        $fulltextTokensTbl = SELECT DISTINCT ydb_token FROM AS_TABLE($fulltextTokens);
+        """
+
         query = f"""
         {vector_search_query}
 
         $vectorSearchResultIds = SELECT id from $vectorSearchResult;
 
+        {token_prepare_query}
+        -- Строим пары (ydb_token, model_id) = декартово произведение токенов и топ-идов
+        $pairs = SELECT ft.ydb_token AS ydb_token, vr.id AS model_id
+        FROM $fulltextTokensTbl AS ft
+        CROSS JOIN $vectorSearchResultIds AS vr;
+
+        -- Точечный lookup по составному PK (ydb_token, model_id) без сканов
+        $hits = SELECT t.model_id AS id, t.ydb_token AS ydb_token
+        FROM $pairs AS p
+        JOIN `fulltext_idx` AS t
+        ON t.ydb_token = p.ydb_token
+        AND t.model_id  = p.model_id;
         """
 
         for missing_count in range(max_missing_tokens_count + 1):
 
             query += f"""
-            $hybridSearchResult{missing_count} = SELECT {self.config.column_map["id"]} as id
-            FROM `{fulltext_index_table_name}`
-            WHERE ydb_token IN $fulltextTokens AND {self.config.column_map["id"]} IN $vectorSearchResultIds
-            GROUP BY {self.config.column_map["id"]}
+            $hybridSearchResult{missing_count} = SELECT id FROM $hits
+            GROUP BY id
             HAVING COUNT(DISTINCT ydb_token) = ListLength($fulltextTokens) - {missing_count};
 
             """
@@ -852,7 +867,7 @@ class YDB(VectorStore):
                     self._convert_vector_to_bytes_if_needed(embedding),
                     self._get_sdk_vector_type()
                 ),
-                "$fulltextTokens": ([token.encode("utf-8") for token in fulltext_tokens], ydb.ListType(ydb.PrimitiveType.String)),
+                "$rawTokens": (fulltext_tokens, ydb.ListType(ydb.PrimitiveType.Utf8)),
             },
         )
         return [
