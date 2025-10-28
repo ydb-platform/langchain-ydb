@@ -852,7 +852,7 @@ class YDB(VectorStore):
                     self._convert_vector_to_bytes_if_needed(embedding),
                     self._get_sdk_vector_type()
                 ),
-                "$fulltextTokens": (fulltext_tokens, ydb.ListType(ydb.PrimitiveType.Utf8)),
+                "$fulltextTokens": ([token.encode("utf-8") for token in fulltext_tokens], ydb.ListType(ydb.PrimitiveType.String)),
             },
         )
         return [
