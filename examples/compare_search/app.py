@@ -119,6 +119,7 @@ def search():
             formatted = []
             for doc, score in results:
                 formatted.append({
+                    'id': doc.id,
                     'document': doc.page_content,
                     'score': float(score),
                     'metadata': doc.metadata if hasattr(doc, 'metadata') else {}
