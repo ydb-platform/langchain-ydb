@@ -146,5 +146,104 @@ def search():
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/v1/search', methods=['POST'])
+def api_search():
+    """API endpoint для внешних клиентов (Postman, curl и т.д.)
+
+    Request JSON:
+    {
+        "query": "search text",
+        "k": 10,
+        "hybrid_enabled": false,
+        "max_missing_tokens": 1
+    }
+
+    Response JSON:
+    {
+        "query": "search text",
+        "parameters": {
+            "k": 10,
+            "hybrid_enabled": false,
+            "max_missing_tokens": 1
+        },
+        "vector_search": {
+            "results": [{"id": "...", "title": "...", "score": 0.95, "metadata": {...}}],
+            "count": 10,
+            "time_ms": 123.4
+        },
+        "hybrid_search": {
+            "results": [{"id": "...", "title": "...", "score": 0.93, "metadata": {...}}],
+            "count": 10,
+            "time_ms": 234.5
+        }
+    }
+    """
+    try:
+        data = request.get_json()
+        query: str = data.get('query', '')
+        k = int(data.get('k', 10))
+        hybrid_enabled = data.get('hybrid_enabled', False)
+        max_missing_tokens = int(data.get('max_missing_tokens', 1))
+
+        if not query.strip():
+            return jsonify({'error': 'Query cannot be empty'}), 400
+
+        # Получаем эмбеддинг для запроса
+        query_embedding = model.embed_query(query)
+
+        # Токенизируем запрос для hybrid search
+        tokens = query.strip().split()
+
+        # Vector search с измерением времени
+        vector_start = time.time()
+        vector_results = regular_similarity_search(query_embedding, k)
+        vector_time = time.time() - vector_start
+
+        # Форматируем результаты для API
+        def format_api_results(results):
+            formatted = []
+            for doc, score in results:
+                formatted.append({
+                    'id': doc.id,
+                    'title': doc.page_content,
+                    'score': float(score),
+                    'metadata': doc.metadata if hasattr(doc, 'metadata') else {}
+                })
+            return formatted
+
+        # Формируем базовый ответ
+        response_data = {
+            'query': query,
+            'parameters': {
+                'k': k,
+                'hybrid_enabled': hybrid_enabled,
+                'max_missing_tokens': max_missing_tokens
+            },
+            'vector_search': {
+                'results': format_api_results(vector_results),
+                'count': len(vector_results),
+                'time_ms': round(vector_time * 1000, 1)
+            }
+        }
+
+        # Hybrid search только если включен
+        if hybrid_enabled:
+            hybrid_start = time.time()
+            hybrid_results = hybrid_search(query_embedding, tokens, k, max_missing_tokens)
+            hybrid_time = time.time() - hybrid_start
+
+            response_data['hybrid_search'] = {
+                'results': format_api_results(hybrid_results),
+                'count': len(hybrid_results),
+                'time_ms': round(hybrid_time * 1000, 1)
+            }
+
+        return jsonify(response_data)
+
+    except Exception as e:
+        print(f"API Error: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, host='::', port=5000)
