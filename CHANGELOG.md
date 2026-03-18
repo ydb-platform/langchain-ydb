@@ -1,3 +1,5 @@
+* Pass library info to sdk
+
 ## 0.0.11 ##
 * Fix missing id in Document
 
