@@ -1,3 +1,4 @@
+## 0.0.12 ##
 * Pass library info to sdk
 
 ## 0.0.11 ##
