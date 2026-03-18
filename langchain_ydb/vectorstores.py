@@ -14,6 +14,8 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 
+from langchain_ydb import __version__ as LANGCHAIN_YDB_VERSION
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,6 +160,10 @@ class YDB(VectorStore):
 
         self.embedding_function = embedding
 
+        additional_sdk_info: tuple[str, ...] = ()
+        if LANGCHAIN_YDB_VERSION:
+            additional_sdk_info = (("langchain-ydb/" + LANGCHAIN_YDB_VERSION),)
+
         # Create a connection to ydb
         self.connection = ydb_dbapi.connect(
             host=self.config.host,
@@ -166,6 +172,7 @@ class YDB(VectorStore):
             username=self.config.username,
             password=self.config.password,
             protocol="grpcs" if self.config.secure else "grpc",
+            _additional_sdk_headers=additional_sdk_info,
             **kwargs,
         )
 
