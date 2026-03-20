@@ -9,8 +9,10 @@ class FakeEmbeddings(Embeddings):
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Return simple embeddings.
         Embeddings encode each text as its index."""
-        return [[float(0.0)] * (i-1) + [float(1.0)] +
-            [float(0.0)] * (9-i) for i in range(len(texts))]
+        return [
+            [float(0.0)] * (i - 1) + [float(1.0)] + [float(0.0)] * (9 - i)
+            for i in range(len(texts))
+        ]
 
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         return self.embed_documents(texts)

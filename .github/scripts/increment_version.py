@@ -142,9 +142,7 @@ def main():
         help="increment version type: patch or minor",
         choices=["minor", "patch"],
     )
-    parser.add_argument(
-        "--beta", choices=["true", "false"], help="is beta version"
-    )
+    parser.add_argument("--beta", choices=["true", "false"], help="is beta version")
     parser.add_argument(
         "--changelog-path",
         default=DEFAULT_CHANGELOG_PATH,

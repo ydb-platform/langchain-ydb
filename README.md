@@ -55,6 +55,24 @@ vector_store = YDB(
 )
 ```
 
+### Async vector store (`AsyncYDB`)
+
+For native asyncio I/O (`ydb.aio` via `ydb-dbapi`), use `AsyncYDB` instead of `YDB`:
+
+```python
+from langchain_ydb.vectorstores import AsyncYDB, YDBSettings
+
+store = await AsyncYDB.afrom_texts(
+    ["hello", "world"],
+    embeddings,
+    config=YDBSettings(table="my_async_table"),
+)
+docs = await store.asimilarity_search("hello", k=1)
+await store.aclose()
+```
+
+Sync methods on `AsyncYDB` are not supported; use `a*` APIs.
+
 #### How to use Credentials
 
 To use `YDB` credentials you have to use `credentials` arg during vector store creation.
