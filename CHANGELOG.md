@@ -1,3 +1,5 @@
+* Async YDB vector store
+
 ## 0.0.12 ##
 * Pass library info to sdk
 
