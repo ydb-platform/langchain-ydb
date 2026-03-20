@@ -6,7 +6,7 @@ import logging
 import struct
 from dataclasses import dataclass, field
 from hashlib import sha1
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import ydb
 import ydb_dbapi
@@ -87,6 +87,10 @@ class YDBSettings:
                                      Defaults to False.
         vector_pass_as_bytes (bool) : Flag to pass vectors as bytes to YDB.
                                       Defaults to True.
+        vector_dimension (int) : Optional embedding size for vector index DDL.
+            If set when ``index_enabled`` is True, skips probing embeddings
+            (avoids sync ``embed_query`` / async ``aembed_query`` at index build).
+            Defaults to None (dimension inferred from a single probe embedding).
     """
 
     host: str = "localhost"
@@ -104,7 +108,6 @@ class YDBSettings:
 
     strategy: str = DEFAULT_SEARCH_STRATEGY
 
-
     index_enabled: bool = False
     index_name: str = "ydb_vector_index"
     index_config_levels: int = 2
@@ -113,86 +116,55 @@ class YDBSettings:
 
     drop_existing_table: bool = False
     vector_pass_as_bytes: bool = True
+    vector_dimension: Optional[int] = None
 
 
-class YDB(VectorStore):
-    """`YDB` vector store.
+_ASYNCYDB_SYNC_MSG = (
+    "AsyncYDB is asyncio-only; use await aadd_texts, await asimilarity_search, "
+    "await AsyncYDB.afrom_texts, or use YDB for synchronous I/O."
+)
 
-    To use, you should have the ``ydb-dbapi`` python package installed.
-    """
 
-    def __init__(
-        self,
-        embedding: Embeddings,
-        config: Optional[YDBSettings] = None,
-        **kwargs: Any,
-    ) -> None:
-        """YDB Wrapper to LangChain
+class _YDBStoreBase:
+    """Shared YQL and YDB type helpers for :class:`YDB` and :class:`AsyncYDB`."""
 
-        Args:
-            embedding (Embeddings): embedding function to use
-            config (YDBSettings): Configuration to YDB DBAPI
-            kwargs (any): Other keyword arguments will pass into ydb-dbapi
-        """
+    config: YDBSettings
+    embedding_function: Embeddings
+    sort_order: str
+    _connect_kwargs: dict[str, Any]
 
+    def _setup_progress_bar(self) -> None:
         try:
             from tqdm import tqdm
 
             self.pgbar = tqdm
         except ImportError:
-            # Just in case if tqdm is not installed
             self.pgbar = lambda x, **kwargs: x
 
-        super().__init__()
-        if config is not None:
-            self.config = config
-        else:
-            self.config = YDBSettings()
-
-        assert self.config
-        assert self.config.host and self.config.port
-        assert self.config.database and self.config.table
-        assert self.config.column_map and self.config.strategy
-
-        self.sort_order = (
-            "DESC" if self.config.strategy.endswith("Similarity") else "ASC"
-        )
-
-        self.embedding_function = embedding
-
-        additional_sdk_info: tuple[str, ...] = ()
+    def _sdk_headers(self) -> tuple[str, ...]:
         if LANGCHAIN_YDB_VERSION:
-            additional_sdk_info = (("langchain-ydb/" + LANGCHAIN_YDB_VERSION),)
+            return (("langchain-ydb/" + LANGCHAIN_YDB_VERSION),)
+        return ()
 
-        # Create a connection to ydb
-        self.connection = ydb_dbapi.connect(
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            username=self.config.username,
-            password=self.config.password,
-            protocol="grpcs" if self.config.secure else "grpc",
-            _additional_sdk_headers=additional_sdk_info,
-            **kwargs,
-        )
-
-        if self.config.drop_existing_table:
-            self.drop()
-
-        self._execute_query(self._prepare_scheme_query(), ddl=True)
-
+    def _prepare_queries_after_schema(self) -> None:
         self._insert_query = self._prepare_insert_query()
-
-        self._add_index_query = self._prepare_add_index_query()
-
         self._batch_ydb_type = self._prepare_document_type()
+
+    @staticmethod
+    def _rows_as_dicts(cursor: Union[ydb_dbapi.Cursor, ydb_dbapi.AsyncCursor]) -> List:
+        if cursor.description is None:
+            return []
+
+        columns = [col[0] for col in cursor.description]
+
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def _prepare_document_type(self) -> ydb.ListType:
         document_struct_type = ydb.StructType()
-        document_struct_type.add_member('id', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member('document', ydb.PrimitiveType.Utf8)
-        document_struct_type.add_member('embedding', self._get_sdk_vector_type())
-        document_struct_type.add_member('metadata', ydb.PrimitiveType.Json)
+        document_struct_type.add_member("id", ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member("document", ydb.PrimitiveType.Utf8)
+        document_struct_type.add_member("embedding", self._get_sdk_vector_type())
+        document_struct_type.add_member("metadata", ydb.PrimitiveType.Json)
         return ydb.ListType(document_struct_type)
 
     @property
@@ -202,10 +174,10 @@ class YDB(VectorStore):
 
     def _convert_vector_to_bytes_if_needed(
         self, vector: list[float]
-    ) -> bytes | list[float]:
+    ) -> Union[bytes, list[float]]:
         if self.config.vector_pass_as_bytes:
             b = struct.pack("f" * len(vector), *vector)
-            return b + b'\x01'
+            return b + b"\x01"
         return vector
 
     def _get_vector_type(self) -> str:
@@ -213,29 +185,10 @@ class YDB(VectorStore):
             return "String"
         return "List<Float>"
 
-    def _get_sdk_vector_type(self) -> ydb.PrimitiveType | ydb.ListType:
+    def _get_sdk_vector_type(self) -> Union[ydb.PrimitiveType, ydb.ListType]:
         if self.config.vector_pass_as_bytes:
             return ydb.PrimitiveType.String
         return ydb.ListType(ydb.PrimitiveType.Float)
-
-    def _execute_query(
-        self,
-        query: str,
-        params: Optional[dict] = None,
-        ddl: bool = False,
-    ) -> List:
-        with self.connection.cursor() as cursor:
-            if ddl:
-                cursor.execute_scheme(query, params)
-            else:
-                cursor.execute(query, params)
-
-            if cursor.description is None:
-                return []
-
-            columns = [col[0] for col in cursor.description]
-
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def _prepare_scheme_query(self) -> str:
         """Create table schema
@@ -278,10 +231,18 @@ class YDB(VectorStore):
             return "distance=manhattan"
         raise ValueError(f"Unsupported strategy: {self.config.strategy}")
 
+    def _resolve_vector_dimension_sync(self) -> int:
+        if self.config.vector_dimension is not None:
+            return self.config.vector_dimension
+        return len(self.embedding_function.embed_query("index"))
 
-    def _prepare_add_index_query(self) -> str:
+    async def _resolve_vector_dimension_async(self) -> int:
+        if self.config.vector_dimension is not None:
+            return self.config.vector_dimension
+        probe = await self.embedding_function.aembed_query("index")  # type: ignore[union-attr]
+        return len(probe)
 
-        vector_dim = len(self.embedding_function.embed_query("index"))
+    def _format_add_index_query(self, vector_dim: int) -> str:
         return f"""
         ALTER TABLE `{self.config.table}`
         ADD INDEX {self.config.index_name}__temp
@@ -296,31 +257,12 @@ class YDB(VectorStore):
         );
         """
 
-    def update_vector_index_if_needed(self) -> None:
-        if not self.config.index_enabled:
-            return
-
-        logger.info("Updating vector index...")
-
-        query = self._prepare_add_index_query()
-        self._execute_query(query, ddl=True)
-        self.connection._driver.table_client.alter_table(
-            f"{self.config.database}/{self.config.table}",
-            rename_indexes=[
-                ydb.RenameIndexItem(
-                    source_name=f"{self.config.index_name}__temp",
-                    destination_name=f"{self.config.index_name}",
-                    replace_destination=True,
-                ),
-            ],
-        )
-
-        logger.info("Vector index updated")
-
-
     def _prepare_insert_query(self) -> str:
-        embedding_select = "embedding" if self.config.vector_pass_as_bytes \
-             else "Untag(Knn::ToBinaryStringFloat(embedding), 'FloatVector')"
+        embedding_select = (
+            "embedding"
+            if self.config.vector_pass_as_bytes
+            else "Untag(Knn::ToBinaryStringFloat(embedding), 'FloatVector')"
+        )
 
         return f"""
         DECLARE $documents AS List<Struct<
@@ -412,6 +354,103 @@ class YDB(VectorStore):
             query += f" WHERE {self.config.column_map['id']} IN {str(ids)}"
         return query
 
+
+class YDB(_YDBStoreBase, VectorStore):
+    """Synchronous YDB vector store (``ydb-dbapi`` + sync driver).
+
+    For native asyncio I/O use :class:`AsyncYDB`.
+    """
+
+    connection: ydb_dbapi.Connection
+
+    def __init__(
+        self,
+        embedding: Embeddings,
+        config: Optional[YDBSettings] = None,
+        **kwargs: Any,
+    ) -> None:
+        """YDB Wrapper to LangChain
+
+        Args:
+            embedding (Embeddings): embedding function to use
+            config (YDBSettings): Configuration to YDB DBAPI
+            kwargs (any): Other keyword arguments will pass into ydb-dbapi
+        """
+
+        connect_kwargs = dict(kwargs)
+
+        super().__init__()
+        self._setup_progress_bar()
+        if config is not None:
+            self.config = config
+        else:
+            self.config = YDBSettings()
+
+        assert self.config
+        assert self.config.host and self.config.port
+        assert self.config.database and self.config.table
+        assert self.config.column_map and self.config.strategy
+
+        self.sort_order = (
+            "DESC" if self.config.strategy.endswith("Similarity") else "ASC"
+        )
+
+        self.embedding_function = embedding
+        self._connect_kwargs = connect_kwargs
+
+        self.connection = ydb_dbapi.connect(
+            host=self.config.host,
+            port=self.config.port,
+            database=self.config.database,
+            username=self.config.username,
+            password=self.config.password,
+            protocol="grpcs" if self.config.secure else "grpc",
+            _additional_sdk_headers=self._sdk_headers(),
+            **self._connect_kwargs,
+        )
+
+        if self.config.drop_existing_table:
+            self.drop()
+
+        self._execute_query(self._prepare_scheme_query(), ddl=True)
+
+        self._prepare_queries_after_schema()
+
+    def _execute_query(
+        self,
+        query: str,
+        params: Optional[dict] = None,
+        ddl: bool = False,
+    ) -> List:
+        with self.connection.cursor() as cursor:
+            if ddl:
+                cursor.execute_scheme(query, params)
+            else:
+                cursor.execute(query, params)
+
+            return self._rows_as_dicts(cursor)
+
+    def update_vector_index_if_needed(self) -> None:
+        if not self.config.index_enabled:
+            return
+
+        logger.info("Updating vector index...")
+
+        query = self._format_add_index_query(self._resolve_vector_dimension_sync())
+        self._execute_query(query, ddl=True)
+        self.connection._driver.table_client.alter_table(
+            f"{self.config.database}/{self.config.table}",
+            rename_indexes=[
+                ydb.RenameIndexItem(
+                    source_name=f"{self.config.index_name}__temp",
+                    destination_name=f"{self.config.index_name}",
+                    replace_destination=True,
+                ),
+            ],
+        )
+
+        logger.info("Vector index updated")
+
     def add_embeddings(
         self,
         texts: Iterable[str],
@@ -456,12 +495,12 @@ class YDB(VectorStore):
         for i in self.pgbar(
             batch_ranges,
             desc="Processing batches...",
-            total=len(batch_ranges)
+            total=len(batch_ranges),
         ):
-            batch_texts = texts_[i:i+batch_size]
-            batch_ids = ids[i:i+batch_size]
-            batch_metadatas = metadatas[i:i+batch_size]
-            batch_embeddings = embeddings[i:i+batch_size]
+            batch_texts = texts_[i : i + batch_size]
+            batch_ids = ids[i : i + batch_size]
+            batch_metadatas = metadatas[i : i + batch_size]
+            batch_embeddings = embeddings[i : i + batch_size]
 
             # Create a list of document structs
             documents = []
@@ -470,10 +509,10 @@ class YDB(VectorStore):
             ):
                 # Use dictionary format for struct values - YDB will convert them
                 document = {
-                    'id': doc_id,
-                    'document': doc_text,
-                    'embedding': self._convert_vector_to_bytes_if_needed(doc_embedding),
-                    'metadata': json.dumps(doc_metadata)
+                    "id": doc_id,
+                    "document": doc_text,
+                    "embedding": self._convert_vector_to_bytes_if_needed(doc_embedding),
+                    "metadata": json.dumps(doc_metadata),
                 }
                 documents.append(document)
 
@@ -481,7 +520,7 @@ class YDB(VectorStore):
             self._execute_query(
                 self._insert_query,
                 {
-                    "$documents": (documents, self._batch_ydb_type)
+                    "$documents": (documents, self._batch_ydb_type),
                 },
             )
 
@@ -519,7 +558,7 @@ class YDB(VectorStore):
         texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
 
         if not batch_embeddings:
-            embeddings = self.embedding_function.embed_documents(texts_) # type: ignore
+            embeddings = self.embedding_function.embed_documents(texts_)  # type: ignore
 
             return self.add_embeddings(
                 texts=texts_,
@@ -547,12 +586,12 @@ class YDB(VectorStore):
         for i in self.pgbar(
             batch_ranges,
             desc="Processing batches...",
-            total=len(batch_ranges)
+            total=len(batch_ranges),
         ):
-            batch_texts = texts_[i:i+batch_size]
-            batch_ids = ids[i:i+batch_size]
-            batch_metadatas = metadatas[i:i+batch_size]
-            batch_embeddings_ = self.embedding_function.embed_documents(batch_texts) # type: ignore
+            batch_texts = texts_[i : i + batch_size]
+            batch_ids = ids[i : i + batch_size]
+            batch_metadatas = metadatas[i : i + batch_size]
+            batch_embeddings_ = self.embedding_function.embed_documents(batch_texts)  # type: ignore
 
             # Create a list of document structs
             documents = []
@@ -561,10 +600,10 @@ class YDB(VectorStore):
             ):
                 # Use dictionary format for struct values - YDB will convert them
                 document = {
-                    'id': doc_id,
-                    'document': doc_text,
-                    'embedding': self._convert_vector_to_bytes_if_needed(doc_embedding),
-                    'metadata': json.dumps(doc_metadata)
+                    "id": doc_id,
+                    "document": doc_text,
+                    "embedding": self._convert_vector_to_bytes_if_needed(doc_embedding),
+                    "metadata": json.dumps(doc_metadata),
                 }
                 documents.append(document)
 
@@ -572,7 +611,7 @@ class YDB(VectorStore):
             self._execute_query(
                 self._insert_query,
                 {
-                    "$documents": (documents, self._batch_ydb_type)
+                    "$documents": (documents, self._batch_ydb_type),
                 },
             )
 
@@ -674,7 +713,7 @@ class YDB(VectorStore):
             params={
                 "$embedding": (
                     self._convert_vector_to_bytes_if_needed(embedding),
-                    self._get_sdk_vector_type()
+                    self._get_sdk_vector_type(),
                 )
             },
         )
@@ -707,7 +746,7 @@ class YDB(VectorStore):
             params={
                 "$embedding": (
                     self._convert_vector_to_bytes_if_needed(embedding),
-                    self._get_sdk_vector_type()
+                    self._get_sdk_vector_type(),
                 )
             },
         )
@@ -747,7 +786,7 @@ class YDB(VectorStore):
             params={
                 "$embedding": (
                     self._convert_vector_to_bytes_if_needed(embedding),
-                    self._get_sdk_vector_type()
+                    self._get_sdk_vector_type(),
                 )
             },
         )
@@ -768,6 +807,404 @@ class YDB(VectorStore):
         Helper function: Drop data
         """
         self._execute_query(
+            f"DROP TABLE IF EXISTS `{self.config.table}`",
+            ddl=True,
+        )
+
+
+class AsyncYDB(_YDBStoreBase, VectorStore):
+    """Async YDB vector store (``ydb.aio`` via ``ydb-dbapi``).
+
+    Create with ``await AsyncYDB.create(...)`` or ``await AsyncYDB.afrom_texts(...)``.
+    Sync methods such as :meth:`add_texts` / :meth:`similarity_search` are not
+    supported (they raise); use ``a*`` APIs and ``await aclose()`` when done.
+    """
+
+    connection: ydb_dbapi.AsyncConnection
+
+    @classmethod
+    async def create(
+        cls,
+        embedding: Embeddings,
+        config: Optional[YDBSettings] = None,
+        **kwargs: Any,
+    ) -> AsyncYDB:
+        """Connect, ensure table schema, and return a store instance."""
+        connect_kwargs = dict(kwargs)
+        self = object.__new__(cls)
+        VectorStore.__init__(self)
+        self._setup_progress_bar()
+        self.config = config if config is not None else YDBSettings()
+        assert self.config
+        assert self.config.host and self.config.port
+        assert self.config.database and self.config.table
+        assert self.config.column_map and self.config.strategy
+        self.sort_order = (
+            "DESC" if self.config.strategy.endswith("Similarity") else "ASC"
+        )
+        self.embedding_function = embedding
+        self._connect_kwargs = connect_kwargs
+        self.connection = await ydb_dbapi.async_connect(
+            host=self.config.host,
+            port=self.config.port,
+            database=self.config.database,
+            username=self.config.username,
+            password=self.config.password,
+            protocol="grpcs" if self.config.secure else "grpc",
+            _additional_sdk_headers=self._sdk_headers(),
+            **connect_kwargs,
+        )
+        if self.config.drop_existing_table:
+            await self.adrop()
+        await self._execute_query_async(self._prepare_scheme_query(), ddl=True)
+        self._prepare_queries_after_schema()
+        return self
+
+    @classmethod
+    async def afrom_texts(
+        cls,
+        texts: list[str],
+        embedding: Embeddings,
+        metadatas: Optional[list[dict]] = None,
+        *,
+        config: Optional[YDBSettings] = None,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        batch_embeddings: bool = True,
+        **kwargs: Any,
+    ) -> AsyncYDB:
+        """Like :meth:`YDB.from_texts` but fully async (driver + embeddings)."""
+        vs = await cls.create(embedding, config, **kwargs)
+        await vs.aadd_texts(
+            texts=texts,
+            metadatas=metadatas,
+            ids=ids,
+            batch_size=batch_size,
+            batch_embeddings=batch_embeddings,
+        )
+        return vs
+
+    async def aclose(self) -> None:
+        """Stop the async driver and session pool."""
+        await self.connection.close()
+
+    async def _execute_query_async(
+        self,
+        query: str,
+        params: Optional[dict] = None,
+        ddl: bool = False,
+    ) -> List:
+        async with self.connection.cursor() as cursor:
+            if ddl:
+                await cursor.execute_scheme(query, params)
+            else:
+                await cursor.execute(query, params)
+
+            return self._rows_as_dicts(cursor)
+
+    async def update_vector_index_if_needed(self) -> None:
+        if not self.config.index_enabled:
+            return
+
+        logger.info("Updating vector index...")
+
+        dim = await self._resolve_vector_dimension_async()
+        query = self._format_add_index_query(dim)
+        await self._execute_query_async(query, ddl=True)
+        await self.connection._driver.table_client.alter_table(
+            f"{self.config.database}/{self.config.table}",
+            rename_indexes=[
+                ydb.RenameIndexItem(
+                    source_name=f"{self.config.index_name}__temp",
+                    destination_name=f"{self.config.index_name}",
+                    replace_destination=True,
+                ),
+            ],
+        )
+
+        logger.info("Vector index updated")
+
+    async def aadd_embeddings(
+        self,
+        texts: Iterable[str],
+        embeddings: list[list[float]],
+        metadatas: Optional[list[dict]] = None,
+        *,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        **kwargs: Any,
+    ) -> list[str]:
+        texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
+
+        if ids is None:
+            ids = [sha1(t.encode("utf-8")).hexdigest() for t in texts_]
+
+        if metadatas and len(metadatas) != len(texts_):
+            msg = (
+                "The number of metadatas must match the number of texts."
+                f"Got {len(metadatas)} metadatas and {len(texts_)} texts."
+            )
+            raise ValueError(msg)
+
+        metadatas = metadatas if metadatas else [{} for _ in range(len(texts_))]
+
+        batch_ranges = range(0, len(texts_), batch_size)
+        for i in self.pgbar(
+            batch_ranges,
+            desc="Processing batches...",
+            total=len(batch_ranges),
+        ):
+            batch_texts = texts_[i : i + batch_size]
+            batch_ids = ids[i : i + batch_size]
+            batch_metadatas = metadatas[i : i + batch_size]
+            batch_embeddings = embeddings[i : i + batch_size]
+
+            documents = []
+            for doc_id, doc_text, doc_embedding, doc_metadata in zip(
+                batch_ids, batch_texts, batch_embeddings, batch_metadatas
+            ):
+                document = {
+                    "id": doc_id,
+                    "document": doc_text,
+                    "embedding": self._convert_vector_to_bytes_if_needed(doc_embedding),
+                    "metadata": json.dumps(doc_metadata),
+                }
+                documents.append(document)
+
+            await self._execute_query_async(
+                self._insert_query,
+                {"$documents": (documents, self._batch_ydb_type)},
+            )
+
+        await self.update_vector_index_if_needed()
+
+        return ids
+
+    async def aadd_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: Optional[list[dict]] = None,
+        *,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        batch_embeddings: bool = True,
+        **kwargs: Any,
+    ) -> list[str]:
+        texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
+        texts_list: list[str] = list(texts_)
+
+        if not batch_embeddings:
+            embeddings = await self.embedding_function.aembed_documents(  # type: ignore[union-attr]
+                texts_list
+            )
+
+            return await self.aadd_embeddings(
+                texts=texts_list,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids,
+                batch_size=batch_size,
+                **kwargs,
+            )
+
+        if ids is None:
+            ids = [sha1(t.encode("utf-8")).hexdigest() for t in texts_list]
+
+        if metadatas and len(metadatas) != len(texts_list):
+            msg = (
+                "The number of metadatas must match the number of texts."
+                f"Got {len(metadatas)} metadatas and {len(texts_list)} texts."
+            )
+            raise ValueError(msg)
+
+        metadatas = metadatas if metadatas else [{} for _ in range(len(texts_list))]
+
+        batch_ranges = range(0, len(texts_list), batch_size)
+        for i in self.pgbar(
+            batch_ranges,
+            desc="Processing batches...",
+            total=len(batch_ranges),
+        ):
+            batch_texts = texts_list[i : i + batch_size]
+            batch_ids = ids[i : i + batch_size]
+            batch_metadatas = metadatas[i : i + batch_size]
+            batch_embeddings_ = await self.embedding_function.aembed_documents(  # type: ignore[union-attr]
+                batch_texts
+            )
+
+            documents = []
+            for doc_id, doc_text, doc_embedding, doc_metadata in zip(
+                batch_ids, batch_texts, batch_embeddings_, batch_metadatas
+            ):
+                document = {
+                    "id": doc_id,
+                    "document": doc_text,
+                    "embedding": self._convert_vector_to_bytes_if_needed(doc_embedding),
+                    "metadata": json.dumps(doc_metadata),
+                }
+                documents.append(document)
+
+            await self._execute_query_async(
+                self._insert_query,
+                {"$documents": (documents, self._batch_ydb_type)},
+            )
+
+        await self.update_vector_index_if_needed()
+
+        return ids
+
+    @classmethod
+    def from_texts(
+        cls,
+        texts: list[str],
+        embedding: Embeddings,
+        metadatas: Optional[list[dict]] = None,
+        *,
+        config: Optional[YDBSettings] = None,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        batch_embeddings: bool = True,
+        **kwargs: Any,
+    ) -> AsyncYDB:
+        raise NotImplementedError(
+            "AsyncYDB does not support sync from_texts; "
+            "use await AsyncYDB.afrom_texts(...)."
+        )
+
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: Optional[list[dict]] = None,
+        *,
+        ids: Optional[list[str]] = None,
+        batch_size: int = 32,
+        batch_embeddings: bool = True,
+        **kwargs: Any,
+    ) -> list[str]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def similarity_search(
+        self, query: str, k: int = 4, filter: Optional[dict] = None, **kwargs: Any
+    ) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def similarity_search_by_vector(
+        self,
+        embedding: list[float],
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def similarity_search_with_score(
+        self, query: str, k: int = 4, filter: Optional[dict] = None, **kwargs: Any
+    ) -> list[tuple[Document, float]]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def similarity_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def delete(self, ids: Optional[list[str]] = None, **kwargs: Any) -> Optional[bool]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def drop(self) -> None:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    async def adelete(
+        self, ids: Optional[list[str]] = None, **kwargs: Any
+    ) -> Optional[bool]:
+        query = self._prepare_delete_query(ids)
+        await self._execute_query_async(query)
+        return True
+
+    async def asimilarity_search(
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        embedding = await self.embedding_function.aembed_query(query)  # type: ignore[union-attr]
+        return await self.asimilarity_search_by_vector(
+            embedding, k, filter=filter, **kwargs
+        )
+
+    async def asimilarity_search_by_vector(
+        self,
+        embedding: list[float],
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        query = self._prepare_search_query(k, filter=filter)
+        res = await self._execute_query_async(
+            query,
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type(),
+                )
+            },
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=json.loads(row["metadata"]),
+                id=row["id"],
+            )
+            for row in res
+        ]
+
+    async def asimilarity_search_with_score(
+        self,
+        query: str,
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        embedding = await self.embedding_function.aembed_query(query)  # type: ignore[union-attr]
+        return await self.asimilarity_search_by_vector_with_score(
+            embedding, k, filter=filter, **kwargs
+        )
+
+    async def asimilarity_search_by_vector_with_score(
+        self,
+        embedding: list[float],
+        k: int = 4,
+        filter: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        query = self._prepare_search_query(k, filter=filter)
+        res = await self._execute_query_async(
+            query,
+            params={
+                "$embedding": (
+                    self._convert_vector_to_bytes_if_needed(embedding),
+                    self._get_sdk_vector_type(),
+                )
+            },
+        )
+        return [
+            (
+                Document(
+                    page_content=row["document"],
+                    metadata=json.loads(row["metadata"]),
+                    id=row["id"],
+                ),
+                row["score"],
+            )
+            for row in res
+        ]
+
+    async def adrop(self) -> None:
+        await self._execute_query_async(
             f"DROP TABLE IF EXISTS `{self.config.table}`",
             ddl=True,
         )
