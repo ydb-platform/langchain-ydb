@@ -1,3 +1,4 @@
+## 0.0.14 ##
 * Fix parsing metadata in case if its already json
 
 ## 0.0.13 ##
