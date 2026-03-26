@@ -151,6 +151,18 @@ class _YDBStoreBase:
         self._batch_ydb_type = self._prepare_document_type()
 
     @staticmethod
+    def _parse_metadata(value: Any) -> dict:
+        """Parse metadata from a YDB result row.
+
+        Depending on the session pool settings (``native_json_in_result_sets``),
+        a JSON column may arrive as a plain Python ``dict`` (native JSON enabled)
+        or as a JSON-encoded ``str`` (native JSON disabled).  Handle both.
+        """
+        if isinstance(value, dict):
+            return value
+        return json.loads(value)
+
+    @staticmethod
     def _rows_as_dicts(cursor: Union[ydb_dbapi.Cursor, ydb_dbapi.AsyncCursor]) -> List:
         if cursor.description is None:
             return []
@@ -720,7 +732,7 @@ class YDB(_YDBStoreBase, VectorStore):
         return [
             Document(
                 page_content=row["document"],
-                metadata=json.loads(row["metadata"]),
+                metadata=self._parse_metadata(row["metadata"]),
                 id=row["id"],
             )
             for row in res
@@ -754,7 +766,7 @@ class YDB(_YDBStoreBase, VectorStore):
             (
                 Document(
                     page_content=row["document"],
-                    metadata=json.loads(row["metadata"]),
+                    metadata=self._parse_metadata(row["metadata"]),
                     id=row["id"],
                 ),
                 row["score"],
@@ -794,7 +806,7 @@ class YDB(_YDBStoreBase, VectorStore):
             (
                 Document(
                     page_content=row["document"],
-                    metadata=json.loads(row["metadata"]),
+                    metadata=self._parse_metadata(row["metadata"]),
                     id=row["id"],
                 ),
                 row["score"],
@@ -1156,7 +1168,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         return [
             Document(
                 page_content=row["document"],
-                metadata=json.loads(row["metadata"]),
+                metadata=self._parse_metadata(row["metadata"]),
                 id=row["id"],
             )
             for row in res
@@ -1195,7 +1207,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             (
                 Document(
                     page_content=row["document"],
-                    metadata=json.loads(row["metadata"]),
+                    metadata=self._parse_metadata(row["metadata"]),
                     id=row["id"],
                 ),
                 row["score"],
