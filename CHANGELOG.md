@@ -1,3 +1,5 @@
+* Fix broken username/credentials to generic credentials
+
 ## 0.0.14 ##
 * Fix parsing metadata in case if its already json
 
