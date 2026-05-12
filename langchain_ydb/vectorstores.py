@@ -51,8 +51,15 @@ class YDBSettings:
     Attribute:
         host (str) : An URL to connect to YDB. Defaults to 'localhost'.
         port (int) : URL port to connect with GRPC. Defaults to 2136.
-        username (str) : Username to login. Defaults to None.
-        password (str) : Password to login. Defaults to None.
+        credentials : Authentication credentials. Defaults to None (anonymous).
+            Accepts:
+
+            - ``None`` — anonymous access.
+            - ``{"username": "...", "password": "..."}`` — login/password auth.
+            - ``{"token": "..."}`` — IAM or static token auth.
+            - ``{"service_account_json": {...}}`` — Yandex Cloud service account.
+            - A ``ydb.Credentials`` instance for full control.
+
         secure (bool) : Connect to server over secure connection. Defaults to False.
         database (str) : Database name to find the table. Defaults to '/local'.
         table (str) : Table name to operate on. Defaults to 'ydb_langchain_store'.
@@ -96,8 +103,7 @@ class YDBSettings:
     host: str = "localhost"
     port: int = 2136
 
-    username: Optional[str] = None
-    password: Optional[str] = None
+    credentials: Union[ydb.Credentials, Dict[str, Any], None] = None
 
     secure: bool = False
 
@@ -390,6 +396,7 @@ class YDB(_YDBStoreBase, VectorStore):
         """
 
         connect_kwargs = dict(kwargs)
+        kwarg_credentials = connect_kwargs.pop("credentials", None)
 
         super().__init__()
         self._setup_progress_bar()
@@ -410,12 +417,16 @@ class YDB(_YDBStoreBase, VectorStore):
         self.embedding_function = embedding
         self._connect_kwargs = connect_kwargs
 
+        credentials = (
+            self.config.credentials
+            if self.config.credentials is not None
+            else kwarg_credentials
+        )
         self.connection = ydb_dbapi.connect(
             host=self.config.host,
             port=self.config.port,
             database=self.config.database,
-            username=self.config.username,
-            password=self.config.password,
+            credentials=credentials,
             protocol="grpcs" if self.config.secure else "grpc",
             _additional_sdk_headers=self._sdk_headers(),
             **self._connect_kwargs,
@@ -843,6 +854,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     ) -> AsyncYDB:
         """Connect, ensure table schema, and return a store instance."""
         connect_kwargs = dict(kwargs)
+        kwarg_credentials = connect_kwargs.pop("credentials", None)
         self = object.__new__(cls)
         VectorStore.__init__(self)
         self._setup_progress_bar()
@@ -856,12 +868,16 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         )
         self.embedding_function = embedding
         self._connect_kwargs = connect_kwargs
+        credentials = (
+            self.config.credentials
+            if self.config.credentials is not None
+            else kwarg_credentials
+        )
         self.connection = await ydb_dbapi.async_connect(
             host=self.config.host,
             port=self.config.port,
             database=self.config.database,
-            username=self.config.username,
-            password=self.config.password,
+            credentials=credentials,
             protocol="grpcs" if self.config.secure else "grpc",
             _additional_sdk_headers=self._sdk_headers(),
             **connect_kwargs,

@@ -75,30 +75,30 @@ Sync methods on `AsyncYDB` are not supported; use `a*` APIs.
 
 #### How to use Credentials
 
-To use `YDB` credentials you have to use `credentials` arg during vector store creation.
+To use `YDB` credentials pass a `credentials` value into `YDBSettings`.
 
 There are several ways to use credentials:
 
 **Static Credentials**:
 
 ```python
-credentials = {"username": "name", "password": "pass"}
+settings = YDBSettings(credentials={"username": "name", "password": "pass"})
 
-vector_store = YDB(embeddings, config=settings, credentials=credentials)
+vector_store = YDB(embeddings, config=settings)
 ```
 
 **Access Token Credentials**:
 
 ```python
-credentials = {"token": "zxc123"}
+settings = YDBSettings(credentials={"token": "zxc123"})
 
-vector_store = YDB(embeddings, config=settings, credentials=credentials)
+vector_store = YDB(embeddings, config=settings)
 ```
 
 **Service Account Credentials**:
 
 ```python
-credentials = {
+settings = YDBSettings(credentials={
     "service_account_json": {
         "id": "...",
         "service_account_id": "...",
@@ -107,9 +107,9 @@ credentials = {
         "public_key": "...",
         "private_key": "..."
     }
-}
+})
 
-vector_store = YDB(embeddings, config=settings, credentials=credentials)
+vector_store = YDB(embeddings, config=settings)
 ```
 
 **Credentials Object From YDB SDK**:
@@ -119,12 +119,9 @@ Additionally, you can use any credentials that comes with `ydb` package. Example
 ```python
 import ydb.iam
 
-vector_store = YDB(
-    embeddings,
-    config=settings,
-    credentials=ydb.iam.MetadataUrlCredentials(),
-)
+settings = YDBSettings(credentials=ydb.iam.MetadataUrlCredentials())
 
+vector_store = YDB(embeddings, config=settings)
 ```
 
 ### Add items to vector store

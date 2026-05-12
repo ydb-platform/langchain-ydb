@@ -29,11 +29,7 @@ def document_eq(doc1: Document, doc2: Document, check_id: bool = False) -> bool:
 def _driver_config_for_tests(config: YDBSettings) -> ydb.DriverConfig:
     protocol = "grpcs" if config.secure else "grpc"
     endpoint = f"{protocol}://{config.host}:{config.port}"
-    creds = prepare_credentials(
-        {"username": config.username, "password": config.password}
-        if config.username
-        else None
-    )
+    creds = prepare_credentials(config.credentials)
     root_certificates = ydb.load_ydb_root_certificate(None)
     return ydb.DriverConfig(
         endpoint=endpoint,
