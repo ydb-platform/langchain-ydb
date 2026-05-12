@@ -1,3 +1,4 @@
+## 0.0.15 ##
 * Fix broken username/credentials to generic credentials
 
 ## 0.0.14 ##
