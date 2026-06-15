@@ -1,3 +1,4 @@
+## 0.0.16 ##
 * Make texts optional in add_embeddings
 
 ## 0.0.15 ##
