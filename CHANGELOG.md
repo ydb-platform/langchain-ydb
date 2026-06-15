@@ -1,3 +1,5 @@
+* Make texts optional in add_embeddings
+
 ## 0.0.15 ##
 * Fix broken username/credentials to generic credentials
 
