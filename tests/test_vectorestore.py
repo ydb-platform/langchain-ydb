@@ -499,6 +499,127 @@ class TestYDBVectorStore:
 
         docsearch.drop()
 
+    def test_add_embeddings_requires_embeddings(self) -> None:
+        """Branch ``embeddings is None``: ``embeddings`` is required."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_add_embeddings_requires_embeddings"
+        docsearch = YDB(embedding=ConsistentFakeEmbeddings(), config=config)
+
+        with pytest.raises(ValueError):
+            docsearch.add_embeddings(metadatas=[{"data": "x"}], ids=["1"])
+
+        docsearch.drop()
+
+    def test_add_embeddings_without_texts_derives_from_metadata(self) -> None:
+        """Branch ``texts is None`` + truthy ``metadatas`` (e.g. the mem0 adapter).
+
+        Generic integrations call ``add_embeddings(embeddings=..., metadatas=...,
+        ids=...)`` without ``texts``; the document text is then derived from each
+        metadata's ``"data"`` key.
+        """
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_add_embeddings_no_texts"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = YDB(embedding=embedding, config=config)
+
+        ids = ["1", "2"]
+        returned_ids = docsearch.add_embeddings(
+            embeddings=embedding.embed_documents(["foo", "bar"]),
+            metadatas=[{"data": "foo-doc"}, {"data": "bar-doc"}],
+            ids=ids,
+        )
+        assert returned_ids == ids
+
+        # "foo" was embedded at index 0, so a query for it matches the first
+        # document, whose page_content was derived from metadata["data"].
+        output = docsearch.similarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(page_content="foo-doc", metadata={"data": "foo-doc"}, id="1"),
+            check_id=True,
+        )
+
+        docsearch.drop()
+
+    def test_add_embeddings_without_texts_metadata_missing_data_key(self) -> None:
+        """Branch ``texts is None`` + ``metadatas`` without a ``"data"`` key.
+
+        The ``.get("data", "")`` fallback leaves the document text empty while the
+        metadata itself is still stored.
+        """
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_add_embeddings_no_data_key"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = YDB(embedding=embedding, config=config)
+
+        returned_ids = docsearch.add_embeddings(
+            embeddings=embedding.embed_documents(["foo"]),
+            metadatas=[{"page": "0"}],
+            ids=["1"],
+        )
+        assert returned_ids == ["1"]
+
+        output = docsearch.similarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(page_content="", metadata={"page": "0"}, id="1"),
+            check_id=True,
+        )
+
+        docsearch.drop()
+
+    def test_add_embeddings_without_texts_or_metadata_uses_empty_strings(self) -> None:
+        """Branch ``texts is None`` + falsy ``metadatas``.
+
+        Document text falls back to ``[""] * len(embeddings)``, one empty string
+        per embedding, so lengths line up and nothing is dropped by ``zip``.
+        """
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_add_embeddings_no_metadata"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = YDB(embedding=embedding, config=config)
+
+        ids = ["1", "2"]
+        returned_ids = docsearch.add_embeddings(
+            embeddings=embedding.embed_documents(["foo", "bar"]),
+            ids=ids,
+        )
+        assert returned_ids == ids
+
+        output = docsearch.similarity_search("foo", k=2)
+        assert len(output) == 2
+        assert document_eq(
+            output[0], Document(page_content="", id="1"), check_id=True
+        )
+
+        docsearch.drop()
+
+    def test_add_embeddings_with_texts_ignores_metadata_data(self) -> None:
+        """Branch ``texts`` provided: derivation is skipped, behavior unchanged."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_add_embeddings_explicit_texts"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = YDB(embedding=embedding, config=config)
+
+        returned_ids = docsearch.add_embeddings(
+            texts=["explicit"],
+            embeddings=embedding.embed_documents(["foo"]),
+            metadatas=[{"data": "from-metadata"}],
+            ids=["1"],
+        )
+        assert returned_ids == ["1"]
+
+        output = docsearch.similarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(
+                page_content="explicit", metadata={"data": "from-metadata"}, id="1"
+            ),
+            check_id=True,
+        )
+
+        docsearch.drop()
+
     @pytest.mark.parametrize(
         "strategy",
         [
@@ -997,6 +1118,119 @@ class TestAsyncYDBVectorStore:
                 else:
                     assert bs <= expected_batch_size
 
+        await self._finish(docsearch)
+
+    @pytest.mark.asyncio
+    async def test_aadd_embeddings_requires_embeddings(self) -> None:
+        """Branch ``embeddings is None``: ``embeddings`` is required."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_async_aadd_embeddings_requires_embeddings"
+        docsearch = await AsyncYDB.create(
+            embedding=ConsistentFakeEmbeddings(), config=config
+        )
+        try:
+            with pytest.raises(ValueError):
+                await docsearch.aadd_embeddings(metadatas=[{"data": "x"}], ids=["1"])
+        finally:
+            await self._finish(docsearch)
+
+    @pytest.mark.asyncio
+    async def test_aadd_embeddings_without_texts_derives_from_metadata(self) -> None:
+        """Branch ``texts is None`` + truthy ``metadatas`` (e.g. the mem0 adapter)."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_async_aadd_embeddings_no_texts"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = await AsyncYDB.create(embedding=embedding, config=config)
+
+        ids = ["1", "2"]
+        returned_ids = await docsearch.aadd_embeddings(
+            embeddings=embedding.embed_documents(["foo", "bar"]),
+            metadatas=[{"data": "foo-doc"}, {"data": "bar-doc"}],
+            ids=ids,
+        )
+        assert returned_ids == ids
+
+        output = await docsearch.asimilarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(page_content="foo-doc", metadata={"data": "foo-doc"}, id="1"),
+            check_id=True,
+        )
+        await self._finish(docsearch)
+
+    @pytest.mark.asyncio
+    async def test_aadd_embeddings_without_texts_metadata_missing_data_key(
+        self,
+    ) -> None:
+        """Branch ``texts is None`` + ``metadatas`` without a ``"data"`` key."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_async_aadd_embeddings_no_data_key"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = await AsyncYDB.create(embedding=embedding, config=config)
+
+        returned_ids = await docsearch.aadd_embeddings(
+            embeddings=embedding.embed_documents(["foo"]),
+            metadatas=[{"page": "0"}],
+            ids=["1"],
+        )
+        assert returned_ids == ["1"]
+
+        output = await docsearch.asimilarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(page_content="", metadata={"page": "0"}, id="1"),
+            check_id=True,
+        )
+        await self._finish(docsearch)
+
+    @pytest.mark.asyncio
+    async def test_aadd_embeddings_without_texts_or_metadata_uses_empty_strings(
+        self,
+    ) -> None:
+        """Branch ``texts is None`` + falsy ``metadatas``: empty strings per row."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_async_aadd_embeddings_no_metadata"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = await AsyncYDB.create(embedding=embedding, config=config)
+
+        ids = ["1", "2"]
+        returned_ids = await docsearch.aadd_embeddings(
+            embeddings=embedding.embed_documents(["foo", "bar"]),
+            ids=ids,
+        )
+        assert returned_ids == ids
+
+        output = await docsearch.asimilarity_search("foo", k=2)
+        assert len(output) == 2
+        assert document_eq(
+            output[0], Document(page_content="", id="1"), check_id=True
+        )
+        await self._finish(docsearch)
+
+    @pytest.mark.asyncio
+    async def test_aadd_embeddings_with_texts_ignores_metadata_data(self) -> None:
+        """Branch ``texts`` provided: derivation is skipped, behavior unchanged."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_async_aadd_embeddings_explicit_texts"
+        embedding = ConsistentFakeEmbeddings()
+        docsearch = await AsyncYDB.create(embedding=embedding, config=config)
+
+        returned_ids = await docsearch.aadd_embeddings(
+            texts=["explicit"],
+            embeddings=embedding.embed_documents(["foo"]),
+            metadatas=[{"data": "from-metadata"}],
+            ids=["1"],
+        )
+        assert returned_ids == ["1"]
+
+        output = await docsearch.asimilarity_search("foo", k=1)
+        assert document_eq(
+            output[0],
+            Document(
+                page_content="explicit", metadata={"data": "from-metadata"}, id="1"
+            ),
+            check_id=True,
+        )
         await self._finish(docsearch)
 
     @pytest.mark.asyncio

@@ -476,8 +476,8 @@ class YDB(_YDBStoreBase, VectorStore):
 
     def add_embeddings(
         self,
-        texts: Iterable[str],
-        embeddings: list[list[float]],
+        texts: Optional[Iterable[str]] = None,
+        embeddings: Optional[list[list[float]]] = None,
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
@@ -487,8 +487,12 @@ class YDB(_YDBStoreBase, VectorStore):
         """Add prepared embeddings to the vectorstore.
 
         Args:
-            texts: Iterable of strings to add to the vectorstore.
-            embeddings: List of embedding vectors.
+            texts: Iterable of strings to add to the vectorstore. Optional: when
+                omitted, the document text is derived from each metadata's
+                ``"data"`` key (falling back to empty strings). This lets generic
+                integrations that call ``add_embeddings`` without ``texts`` -- for
+                example the mem0 adapter -- work against YDB.
+            embeddings: List of embedding vectors. Required.
             metadatas: Optional list of metadatas associated with the texts.
             ids: Optional list of IDs associated with the texts.
             batch_size: Number of texts to process in a single batch. Defaults to 32.
@@ -499,6 +503,17 @@ class YDB(_YDBStoreBase, VectorStore):
         Returns:
             List of ids from adding the texts into the vectorstore.
         """
+        if embeddings is None:
+            msg = "embeddings must be provided to add_embeddings."
+            raise ValueError(msg)
+
+        if texts is None:
+            texts = (
+                [m.get("data", "") for m in metadatas]
+                if metadatas
+                else [""] * len(embeddings)
+            )
+
         texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
 
         if ids is None:
@@ -954,14 +969,25 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
 
     async def aadd_embeddings(
         self,
-        texts: Iterable[str],
-        embeddings: list[list[float]],
+        texts: Optional[Iterable[str]] = None,
+        embeddings: Optional[list[list[float]]] = None,
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
         batch_size: int = 32,
         **kwargs: Any,
     ) -> list[str]:
+        if embeddings is None:
+            msg = "embeddings must be provided to aadd_embeddings."
+            raise ValueError(msg)
+
+        if texts is None:
+            texts = (
+                [m.get("data", "") for m in metadatas]
+                if metadatas
+                else [""] * len(embeddings)
+            )
+
         texts_ = texts if isinstance(texts, (list, tuple)) else list(texts)
 
         if ids is None:
