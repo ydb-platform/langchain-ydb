@@ -1,3 +1,5 @@
+* Add `get_by_ids()` / `aget_by_ids()` to `YDB` & `AsyncYDB` vector stores
+
 ## 0.0.16 ##
 * Make texts optional in add_embeddings
 
