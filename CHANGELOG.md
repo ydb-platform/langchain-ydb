@@ -1,7 +1,4 @@
-## Unreleased ##
 * Add `get_by_ids()` / `aget_by_ids()` to `YDB` & `AsyncYDB` vector stores
-  (parameterized `IN $ids`, input order preserved, duplicate ids collapsed,
-  missing ids skipped). Unblocks mem0's get/update/delete over the YDB store.
 
 ## 0.0.16 ##
 * Make texts optional in add_embeddings

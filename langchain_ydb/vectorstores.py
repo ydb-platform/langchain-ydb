@@ -401,9 +401,12 @@ class _YDBStoreBase:
             for row in res
         }
         seen: set[str] = set()
-        return [
-            by_id[i] for i in id_list if i in by_id and not (i in seen or seen.add(i))
-        ]
+        docs: list[Document] = []
+        for i in id_list:
+            if i in by_id and i not in seen:
+                seen.add(i)
+                docs.append(by_id[i])
+        return docs
 
 
 class YDB(_YDBStoreBase, VectorStore):

@@ -75,7 +75,7 @@ class TestYDBVectorStore:
         docsearch.drop()
 
     def test_get_by_ids(self) -> None:
-        """get_by_ids: returns docs by id, in input order, dups collapsed, missing skipped."""
+        """get_by_ids: docs by id, input order kept, dups collapsed, missing skipped."""
         config = YDBSettings(drop_existing_table=True)
         config.table = "test_ydb_get_by_ids"
         docsearch = YDB.from_texts(
@@ -86,8 +86,11 @@ class TestYDBVectorStore:
         )
         try:
             got = docsearch.get_by_ids(["id-c", "id-a", "id-c", "missing"])
-            assert [d.id for d in got] == ["id-c", "id-a"]  # order kept, dup→1, missing skipped
-            assert document_eq(got[0], Document(page_content="gamma"), check_id=True)
+            # order kept, dup collapsed to one, missing skipped
+            assert [d.id for d in got] == ["id-c", "id-a"]
+            assert document_eq(
+                got[0], Document(page_content="gamma", id="id-c"), check_id=True
+            )
             assert docsearch.get_by_ids([]) == []
         finally:
             docsearch.drop()
