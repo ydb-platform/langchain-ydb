@@ -6,7 +6,7 @@ import logging
 import struct
 from dataclasses import dataclass, field
 from hashlib import sha1
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import ydb
 import ydb_dbapi
@@ -372,6 +372,39 @@ class _YDBStoreBase:
             query += f" WHERE {self.config.column_map['id']} IN {str(ids)}"
         return query
 
+    def _prepare_get_by_ids_query(self) -> str:
+        cols = self.config.column_map
+        return f"""
+        DECLARE $ids AS List<Utf8>;
+        SELECT
+            {cols["id"]} as id,
+            {cols["document"]} as document,
+            {cols["metadata"]} as metadata
+        FROM {self.config.table}
+        WHERE {cols["id"]} IN $ids;
+        """
+
+    @staticmethod
+    def _get_by_ids_params(ids: Sequence[str]) -> tuple[list[str], dict]:
+        # Pass ids as a server-side List<Utf8> parameter (never string-interpolated),
+        # so an id containing a quote cannot break out of the query.
+        id_list = [str(i) for i in ids]
+        return id_list, {"$ids": (id_list, ydb.ListType(ydb.PrimitiveType.Utf8))}
+
+    def _docs_by_input_order(self, res: list, id_list: list[str]) -> list[Document]:
+        by_id = {
+            row["id"]: Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in res
+        }
+        seen: set[str] = set()
+        return [
+            by_id[i] for i in id_list if i in by_id and not (i in seen or seen.add(i))
+        ]
+
 
 class YDB(_YDBStoreBase, VectorStore):
     """Synchronous YDB vector store (``ydb-dbapi`` + sync driver).
@@ -710,6 +743,18 @@ class YDB(_YDBStoreBase, VectorStore):
         query = self._prepare_delete_query(ids)
         self._execute_query(query)
         return True
+
+    def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
+        """Get documents by their ids.
+
+        Returns a document for each id that exists; ids that are not found are
+        skipped, and a repeated id yields at most one document.
+        """
+        if not ids:
+            return []
+        id_list, params = self._get_by_ids_params(ids)
+        res = self._execute_query(self._prepare_get_by_ids_query(), params=params)
+        return self._docs_by_input_order(res, id_list)
 
     def similarity_search(
         self, query: str, k: int = 4, filter: Optional[dict] = None, **kwargs: Any
@@ -1168,6 +1213,9 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     def delete(self, ids: Optional[list[str]] = None, **kwargs: Any) -> Optional[bool]:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
+    def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
     def drop(self) -> None:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
@@ -1177,6 +1225,16 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         query = self._prepare_delete_query(ids)
         await self._execute_query_async(query)
         return True
+
+    async def aget_by_ids(self, ids: Sequence[str], /) -> list[Document]:
+        """Get documents by their ids (async). See ``YDB.get_by_ids``."""
+        if not ids:
+            return []
+        id_list, params = self._get_by_ids_params(ids)
+        res = await self._execute_query_async(
+            self._prepare_get_by_ids_query(), params=params
+        )
+        return self._docs_by_input_order(res, id_list)
 
     async def asimilarity_search(
         self,

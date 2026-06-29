@@ -74,6 +74,43 @@ class TestYDBVectorStore:
         assert document_eq(output[0], Document(page_content="foo"))
         docsearch.drop()
 
+    def test_get_by_ids(self) -> None:
+        """get_by_ids: returns docs by id, in input order, dups collapsed, missing skipped."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_get_by_ids"
+        docsearch = YDB.from_texts(
+            ["alpha", "beta", "gamma"],
+            ConsistentFakeEmbeddings(),
+            config=config,
+            ids=["id-a", "id-b", "id-c"],
+        )
+        try:
+            got = docsearch.get_by_ids(["id-c", "id-a", "id-c", "missing"])
+            assert [d.id for d in got] == ["id-c", "id-a"]  # order kept, dup→1, missing skipped
+            assert document_eq(got[0], Document(page_content="gamma"), check_id=True)
+            assert docsearch.get_by_ids([]) == []
+        finally:
+            docsearch.drop()
+
+    @pytest.mark.asyncio
+    async def test_aget_by_ids(self) -> None:
+        """aget_by_ids mirrors get_by_ids on AsyncYDB."""
+        config = YDBSettings(drop_existing_table=True)
+        config.table = "test_ydb_aget_by_ids"
+        store = await AsyncYDB.afrom_texts(
+            ["alpha", "beta", "gamma"],
+            ConsistentFakeEmbeddings(),
+            config=config,
+            ids=["id-a", "id-b", "id-c"],
+        )
+        try:
+            got = await store.aget_by_ids(["id-c", "id-a", "id-c", "missing"])
+            assert [d.id for d in got] == ["id-c", "id-a"]
+            assert await store.aget_by_ids([]) == []
+        finally:
+            await store.adrop()
+            await store.aclose()
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("vector_pass_as_bytes", [True, False])
     async def test_asimilarity_search_uses_executor(
