@@ -73,6 +73,43 @@ await store.aclose()
 
 Sync methods on `AsyncYDB` are not supported; use `a*` APIs.
 
+### Hybrid search
+
+On a YDB server that supports [HybridRank](https://ydb.tech/docs/en/dev/hybrid-search?version=main),
+enable hybrid search to combine fulltext relevance with vector similarity. The
+store uses the existing `document` and `embedding` columns. It creates missing
+`fulltext_relevance` and `vector_kmeans_tree` indexes and waits for them to be
+ready. Opening a populated table with the same settings builds the missing indexes
+over its existing documents; no data migration or re-embedding is needed.
+
+```python
+from langchain_ydb.vectorstores import YDB, YDBSettings
+
+settings = YDBSettings(
+    table="my_documents",
+    hybrid_search_enabled=True,
+    vector_dimension=1536,  # optional if the embedding model can be probed
+)
+store = YDB(embeddings, config=settings)
+store.add_texts(["A document about databases"])
+
+documents = store.hybrid_search("database", k=4)
+retriever = store.as_hybrid_retriever(k=4)
+documents = retriever.invoke("database")
+```
+
+Use the same settings and table name to open an existing store. Set `index_name`
+and `fulltext_index_name` if those indexes already exist under custom names.
+`hybrid_index_build_timeout` controls how long opening the store waits for index
+backfill. For asynchronous I/O, use `await AsyncYDB.create(embeddings, config=settings)`,
+`await store.ahybrid_search(...)`, and `await retriever.ainvoke(...)`.
+
+The default fusion is RRF. `hybrid_search` and `ahybrid_search` also accept
+`mode="linear"`, `weights=(text_weight, vector_weight)`, and
+`candidate_limits=(text_candidates, vector_candidates)`. The existing
+`similarity_search` methods remain vector-only. Metadata filters and a fused
+numeric score are not available through the native hybrid query.
+
 #### How to use Credentials
 
 To use `YDB` credentials pass a `credentials` value into `YDBSettings`.

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import logging
+import math
 import struct
+import time
 from dataclasses import dataclass, field
 from hashlib import sha1
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union, cast
 
 import ydb
 import ydb_dbapi
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.vectorstores import VectorStore
+from pydantic import Field
 
 from langchain_ydb import __version__ as LANGCHAIN_YDB_VERSION
 
@@ -98,6 +103,12 @@ class YDBSettings:
             If set when ``index_enabled`` is True, skips probing embeddings
             (avoids sync ``embed_query`` / async ``aembed_query`` at index build).
             Defaults to None (dimension inferred from a single probe embedding).
+        hybrid_search_enabled (bool): Create any missing fulltext and vector indexes
+            when opening the store, including an existing table. Defaults to False.
+        fulltext_index_name (str): Name of the fulltext relevance index used by
+            hybrid search. Defaults to 'ydb_fulltext_index'.
+        hybrid_index_build_timeout (float): Seconds to wait for both indexes to
+            become ready when opening the store. Defaults to 300.
     """
 
     host: str = "localhost"
@@ -123,6 +134,9 @@ class YDBSettings:
     drop_existing_table: bool = False
     vector_pass_as_bytes: bool = True
     vector_dimension: Optional[int] = None
+    hybrid_search_enabled: bool = False
+    fulltext_index_name: str = "ydb_fulltext_index"
+    hybrid_index_build_timeout: float = 300.0
 
 
 _ASYNCYDB_SYNC_MSG = (
@@ -261,9 +275,16 @@ class _YDBStoreBase:
         return len(probe)
 
     def _format_add_index_query(self, vector_dim: int) -> str:
+        return self._format_add_named_vector_index_query(
+            vector_dim, f"{self.config.index_name}__temp"
+        )
+
+    def _format_add_named_vector_index_query(
+        self, vector_dim: int, index_name: str
+    ) -> str:
         return f"""
         ALTER TABLE `{self.config.table}`
-        ADD INDEX {self.config.index_name}__temp
+        ADD INDEX `{index_name}`
         GLOBAL USING vector_kmeans_tree
         ON ({self.config.column_map["embedding"]})
         WITH (
@@ -274,6 +295,122 @@ class _YDBStoreBase:
             clusters={self.config.index_config_clusters}
         );
         """
+
+    def _format_add_fulltext_index_query(self) -> str:
+        return f"""
+        ALTER TABLE `{self.config.table}`
+        ADD INDEX `{self.config.fulltext_index_name}`
+        GLOBAL USING fulltext_relevance
+        ON (`{self.config.column_map['document']}`)
+        WITH (tokenizer=standard, use_filter_lowercase=true);
+        """
+
+    def _table_path(self) -> str:
+        return f"{self.config.database.rstrip('/')}/{self.config.table.lstrip('/')}"
+
+    def _validate_hybrid_settings(self) -> None:
+        if self.config.index_name == self.config.fulltext_index_name:
+            raise ValueError("Vector and fulltext index names must be different.")
+        if (
+            not math.isfinite(self.config.hybrid_index_build_timeout)
+            or self.config.hybrid_index_build_timeout <= 0
+        ):
+            raise ValueError("hybrid_index_build_timeout must be finite and positive.")
+
+    def _check_hybrid_indexes(self, indexes: list) -> bool:
+        by_name = {index.name: index for index in indexes}
+        expected = {
+            self.config.index_name: self.config.column_map["embedding"],
+            self.config.fulltext_index_name: self.config.column_map["document"],
+        }
+        for name, column in expected.items():
+            index = by_name.get(name)
+            if index is None:
+                return False
+            if index.index_columns != [column]:
+                raise ValueError(
+                    f"Index {name!r} exists but indexes {index.index_columns!r}, "
+                    f"expected [{column!r}]."
+                )
+        return all(by_name[name].status == ydb.IndexStatus.READY for name in expected)
+
+    def _prepare_hybrid_search_query(
+        self,
+        k: int,
+        mode: str,
+        weights: tuple[float, float],
+        candidate_limits: Optional[tuple[int, int]],
+    ) -> str:
+        if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+            raise ValueError("k must be a positive integer.")
+        if mode not in ("rrf", "linear"):
+            raise ValueError("mode must be 'rrf' or 'linear'.")
+        if len(weights) != 2 or any(
+            not math.isfinite(weight) or weight < 0 for weight in weights
+        ):
+            raise ValueError("weights must contain two finite non-negative numbers.")
+        if candidate_limits is not None and (
+            len(candidate_limits) != 2
+            or any(
+                not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0
+                for limit in candidate_limits
+            )
+        ):
+            raise ValueError("candidate_limits must contain two positive integers.")
+
+        if self.config.vector_pass_as_bytes:
+            vector_declaration = "DECLARE $embedding AS String;"
+            target_embedding = "$embedding"
+        else:
+            vector_declaration = "DECLARE $embedding AS List<Float>;"
+            target_embedding = "Knn::ToBinaryStringFloat($embedding)"
+
+        cols = self.config.column_map
+        index_option = (
+            f"({json.dumps(self.config.fulltext_index_name)}, "
+            f"{json.dumps(self.config.index_name)}) AS Indexes"
+        )
+        limits_option = (
+            f", ({candidate_limits[0]}, {candidate_limits[1]}) AS Limits"
+            if candidate_limits is not None
+            else ""
+        )
+        return f"""
+        PRAGMA ydb.KMeansTreeSearchTopSize="{self.config.index_tree_search_top_size}";
+        DECLARE $query_text AS Utf8;
+        {vector_declaration}
+
+        SELECT
+            `{cols['id']}` AS id,
+            `{cols['document']}` AS document,
+            `{cols['metadata']}` AS metadata
+        FROM `{self.config.table}`
+        ORDER BY HybridRank(
+            FullTextScore(`{cols['document']}`, $query_text),
+            Knn::{self.config.strategy}(`{cols['embedding']}`, {target_embedding}),
+            "{mode}" AS Mode,
+            ({float(weights[0])}, {float(weights[1])}) AS Weights,
+            {index_option}{limits_option})
+        LIMIT {k};
+        """
+
+    def _hybrid_search_params(self, query: str, embedding: list[float]) -> dict:
+        return {
+            "$query_text": (query, ydb.PrimitiveType.Utf8),
+            "$embedding": (
+                self._convert_vector_to_bytes_if_needed(embedding),
+                self._get_sdk_vector_type(),
+            ),
+        }
+
+    def as_hybrid_retriever(self, **search_kwargs: Any) -> YDBHybridRetriever:
+        """Return a LangChain retriever backed by native YDB hybrid search."""
+        if not self.config.hybrid_search_enabled:
+            raise ValueError("Set hybrid_search_enabled=True in YDBSettings first.")
+        return YDBHybridRetriever(
+            vectorstore=cast(Union[YDB, AsyncYDB], self),
+            search_kwargs=search_kwargs,
+        )
 
     def _prepare_insert_query(self) -> str:
         embedding_select = (
@@ -311,7 +448,7 @@ class _YDBStoreBase:
     ) -> str:
         where_statement = ""
         if filter:
-            if self.config.index_enabled:
+            if self.config.index_enabled or self.config.hybrid_search_enabled:
                 raise ValueError("Unable to use filter with enabled vector index.")
 
             where_statement = "WHERE "
@@ -326,14 +463,14 @@ class _YDBStoreBase:
         embedding_col = self.config.column_map["embedding"]
 
         pragma_statement = ""
-        if self.config.index_enabled:
+        if self.config.index_enabled or self.config.hybrid_search_enabled:
             size = self.config.index_tree_search_top_size
             pragma_statement = f"""
             PRAGMA ydb.KMeansTreeSearchTopSize="{size}";
             """
 
         view_index = ""
-        if self.config.index_enabled:
+        if self.config.index_enabled or self.config.hybrid_search_enabled:
             view_index = f"VIEW {self.config.index_name}"
 
         if self.config.vector_pass_as_bytes:
@@ -474,6 +611,8 @@ class YDB(_YDBStoreBase, VectorStore):
         self._execute_query(self._prepare_scheme_query(), ddl=True)
 
         self._prepare_queries_after_schema()
+        if self.config.hybrid_search_enabled:
+            self._ensure_hybrid_indexes()
 
     def _execute_query(
         self,
@@ -490,7 +629,7 @@ class YDB(_YDBStoreBase, VectorStore):
             return self._rows_as_dicts(cursor)
 
     def update_vector_index_if_needed(self) -> None:
-        if not self.config.index_enabled:
+        if not (self.config.index_enabled or self.config.hybrid_search_enabled):
             return
 
         logger.info("Updating vector index...")
@@ -509,6 +648,30 @@ class YDB(_YDBStoreBase, VectorStore):
         )
 
         logger.info("Vector index updated")
+
+    def _ensure_hybrid_indexes(self) -> None:
+        self._validate_hybrid_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = table_client.describe_table(table_path).indexes
+        self._check_hybrid_indexes(indexes)
+        names = {index.name for index in indexes}
+        if self.config.index_name not in names:
+            dim = self._resolve_vector_dimension_sync()
+            self._execute_query(
+                self._format_add_named_vector_index_query(dim, self.config.index_name),
+                ddl=True,
+            )
+        if self.config.fulltext_index_name not in names:
+            self._execute_query(self._format_add_fulltext_index_query(), ddl=True)
+
+        deadline = time.monotonic() + self.config.hybrid_index_build_timeout
+        while not self._check_hybrid_indexes(
+            table_client.describe_table(table_path).indexes
+        ):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Hybrid indexes for {table_path} are not ready.")
+            time.sleep(0.5)
 
     def add_embeddings(
         self,
@@ -775,6 +938,58 @@ class YDB(_YDBStoreBase, VectorStore):
         embedding = self.embedding_function.embed_query(query)
         return self.similarity_search_by_vector(embedding, k, filter=filter, **kwargs)
 
+    def hybrid_search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        filter: Optional[dict] = None,
+        mode: str = "rrf",
+        weights: tuple[float, float] = (1.0, 1.0),
+        candidate_limits: Optional[tuple[int, int]] = None,
+    ) -> list[Document]:
+        """Search text and embeddings together with YDB HybridRank."""
+        if not self.config.hybrid_search_enabled:
+            raise ValueError("Set hybrid_search_enabled=True in YDBSettings first.")
+        if filter is not None:
+            raise ValueError("Metadata filters are not supported by YDB HybridRank.")
+        statement = self._prepare_hybrid_search_query(
+            k, mode, weights, candidate_limits
+        )
+        embedding = self.embedding_function.embed_query(query)
+        rows = self._execute_query(
+            statement, params=self._hybrid_search_params(query, embedding)
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    async def ahybrid_search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        filter: Optional[dict] = None,
+        mode: str = "rrf",
+        weights: tuple[float, float] = (1.0, 1.0),
+        candidate_limits: Optional[tuple[int, int]] = None,
+    ) -> list[Document]:
+        """Run hybrid search from an async caller using the sync YDB driver."""
+        return await asyncio.to_thread(
+            self.hybrid_search,
+            query,
+            k,
+            filter=filter,
+            mode=mode,
+            weights=weights,
+            candidate_limits=candidate_limits,
+        )
+
     def similarity_search_by_vector(
         self,
         embedding: list[float],
@@ -949,6 +1164,8 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             await self.adrop()
         await self._execute_query_async(self._prepare_scheme_query(), ddl=True)
         self._prepare_queries_after_schema()
+        if self.config.hybrid_search_enabled:
+            await self._ensure_hybrid_indexes()
         return self
 
     @classmethod
@@ -994,7 +1211,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             return self._rows_as_dicts(cursor)
 
     async def update_vector_index_if_needed(self) -> None:
-        if not self.config.index_enabled:
+        if not (self.config.index_enabled or self.config.hybrid_search_enabled):
             return
 
         logger.info("Updating vector index...")
@@ -1014,6 +1231,32 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         )
 
         logger.info("Vector index updated")
+
+    async def _ensure_hybrid_indexes(self) -> None:
+        self._validate_hybrid_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = (await table_client.describe_table(table_path)).indexes
+        self._check_hybrid_indexes(indexes)
+        names = {index.name for index in indexes}
+        if self.config.index_name not in names:
+            dim = await self._resolve_vector_dimension_async()
+            await self._execute_query_async(
+                self._format_add_named_vector_index_query(dim, self.config.index_name),
+                ddl=True,
+            )
+        if self.config.fulltext_index_name not in names:
+            await self._execute_query_async(
+                self._format_add_fulltext_index_query(), ddl=True
+            )
+
+        deadline = time.monotonic() + self.config.hybrid_index_build_timeout
+        while not self._check_hybrid_indexes(
+            (await table_client.describe_table(table_path)).indexes
+        ):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Hybrid indexes for {table_path} are not ready.")
+            await asyncio.sleep(0.5)
 
     async def aadd_embeddings(
         self,
@@ -1190,6 +1433,18 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     ) -> list[Document]:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
+    def hybrid_search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        filter: Optional[dict] = None,
+        mode: str = "rrf",
+        weights: tuple[float, float] = (1.0, 1.0),
+        candidate_limits: Optional[tuple[int, int]] = None,
+    ) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
     def similarity_search_by_vector(
         self,
         embedding: list[float],
@@ -1250,6 +1505,37 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         return await self.asimilarity_search_by_vector(
             embedding, k, filter=filter, **kwargs
         )
+
+    async def ahybrid_search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        filter: Optional[dict] = None,
+        mode: str = "rrf",
+        weights: tuple[float, float] = (1.0, 1.0),
+        candidate_limits: Optional[tuple[int, int]] = None,
+    ) -> list[Document]:
+        """Search text and embeddings together with YDB HybridRank."""
+        if not self.config.hybrid_search_enabled:
+            raise ValueError("Set hybrid_search_enabled=True in YDBSettings first.")
+        if filter is not None:
+            raise ValueError("Metadata filters are not supported by YDB HybridRank.")
+        statement = self._prepare_hybrid_search_query(
+            k, mode, weights, candidate_limits
+        )
+        embedding = await self.embedding_function.aembed_query(query)
+        rows = await self._execute_query_async(
+            statement, params=self._hybrid_search_params(query, embedding)
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
 
     async def asimilarity_search_by_vector(
         self,
@@ -1322,4 +1608,25 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         await self._execute_query_async(
             f"DROP TABLE IF EXISTS `{self.config.table}`",
             ddl=True,
+        )
+
+
+class YDBHybridRetriever(BaseRetriever):
+    """LangChain retriever for the native YDB fulltext/vector hybrid query."""
+
+    vectorstore: Union[YDB, AsyncYDB]
+    search_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: Any, **kwargs: Any
+    ) -> list[Document]:
+        return self.vectorstore.hybrid_search(
+            query, **(self.search_kwargs | kwargs)
+        )
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: Any, **kwargs: Any
+    ) -> list[Document]:
+        return await self.vectorstore.ahybrid_search(
+            query, **(self.search_kwargs | kwargs)
         )

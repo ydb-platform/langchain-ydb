@@ -1,3 +1,5 @@
+* Add native YDB hybrid search and retrievers for new and existing vector stores
+
 ## 0.0.17 ##
 * Add `get_by_ids()` / `aget_by_ids()` to `YDB` & `AsyncYDB` vector stores
 
