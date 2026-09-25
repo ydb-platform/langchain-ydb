@@ -73,6 +73,63 @@ await store.aclose()
 
 Sync methods on `AsyncYDB` are not supported; use `a*` APIs.
 
+### Configuration
+
+Pass a `YDBSettings` instance to `YDB` or `AsyncYDB`. The fields below control
+connections, table creation, and search. Defaults apply when a field is omitted.
+
+#### Connection and table
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `host` | `"localhost"` | YDB host. |
+| `port` | `2136` | gRPC port. |
+| `credentials` | `None` | Authentication; see [Credentials](#how-to-use-credentials) below. |
+| `secure` | `False` | Use `grpcs` instead of `grpc`. |
+| `database` | `"/local"` | Database containing the table. |
+| `table` | `"ydb_langchain_store"` | Table to create or open. |
+| `column_map` | `id`, `document`, `embedding`, `metadata` | Maps these four roles to table columns. Supply all four names for a custom schema. |
+| `drop_existing_table` | `False` | Drop and recreate the table when the store opens. Leave `False` to reuse existing data. |
+
+For a table with custom column names:
+
+```python
+settings = YDBSettings(
+    table="my_documents",
+    column_map={
+        "id": "doc_id",
+        "document": "body",
+        "embedding": "body_vector",
+        "metadata": "attributes",
+    },
+)
+```
+
+#### Vector search and index
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `strategy` | `YDBSearchStrategy.COSINE_SIMILARITY` | Vector scoring function and index metric. Match the metric of an existing index. |
+| `index_enabled` | `False` | Use a vector index for similarity search and rebuild it after writes. On a new table, the index is first created after adding documents. Hybrid search creates missing indexes when the store opens. |
+| `index_name` | `"ydb_vector_index"` | Vector index name; set it to the existing name when reusing an index. |
+| `index_config_levels` | `2` | K-means tree depth when a vector index is created or rebuilt. |
+| `index_config_clusters` | `128` | Number of clusters when a vector index is created or rebuilt. |
+| `index_tree_search_top_size` | `1` | `ydb.KMeansTreeSearchTopSize` for indexed vector queries, including the vector branch of hybrid search. Higher values search more tree candidates. |
+| `vector_dimension` | `None` | Embedding dimension for index creation or rebuild. If omitted when needed, it is inferred from `embed_query("index")` or `aembed_query("index")`. |
+| `vector_pass_as_bytes` | `True` | Pass document and query vectors as binary `String` values. With `False`, pass `List<Float>` and convert in YQL. |
+
+Index creation settings affect a new or rebuilt vector index. Opening a table
+with a ready index does not change that index. Adding documents rebuilds the
+vector index when `index_enabled` or `hybrid_search_enabled` is set.
+
+#### Hybrid index setup
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `hybrid_search_enabled` | `False` | Enable hybrid search and create any missing fulltext and vector indexes when opening a new or existing table. Implies indexed vector search even if `index_enabled=False`. |
+| `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
+| `hybrid_index_ready_timeout` | `3600.0` seconds | Maximum wait for both indexes to become ready after creation. If a build stays incomplete, opening the store raises `TimeoutError` with the current index states. Increase it for large existing tables. |
+
 #### How to use Credentials
 
 To use `YDB` credentials pass a `credentials` value into `YDBSettings`.
@@ -246,6 +303,9 @@ for res, score in results:
 
 You can search with filters as described below:
 
+This works with the default linear scan. Indexed vector search (including a
+store with `hybrid_search_enabled=True`) rejects metadata filters.
+
 ```python
 results = vector_store.similarity_search_with_score(
     "What did I eat for breakfast?",
@@ -272,3 +332,100 @@ results = retriever.invoke(
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
 ```
+
+## Hybrid search
+
+On a YDB server that supports [HybridRank](https://ydb.tech/docs/en/dev/hybrid-search?version=main),
+hybrid search combines fulltext relevance over the document column with vector
+similarity over the embedding column. Both indexes belong to the same table.
+Set `hybrid_search_enabled=True` to create missing indexes and wait until they
+are ready. Existing documents are indexed in place without recomputing their
+embeddings.
+
+### New table
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_ydb.vectorstores import YDB, YDBSettings
+
+settings = YDBSettings(
+    table="my_documents",
+    hybrid_search_enabled=True,
+    vector_dimension=1536,  # set this to your model's embedding size
+)
+store = YDB(OpenAIEmbeddings(), config=settings)
+store.add_texts(["A document about databases"])
+
+documents = store.hybrid_search("database", k=4)
+retriever = store.as_hybrid_retriever(k=4)
+documents = retriever.invoke("database")
+```
+
+### Existing table
+
+Open the same table with `hybrid_search_enabled=True` and leave
+`drop_existing_table=False` (the default). Set `index_name` and
+`fulltext_index_name` to the names of any indexes you want to reuse. Missing
+indexes are built over the existing rows; ready indexes with those names are
+reused. When reusing an index, opening the store also embeds one probe query
+and runs a small hybrid search to check that YDB accepts the index types and
+vector metric.
+
+```python
+settings = YDBSettings(
+    table="my_documents",
+    hybrid_search_enabled=True,
+    index_name="existing_vector_index",
+    fulltext_index_name="document_relevance_index",
+    vector_dimension=1536,
+)
+store = YDB(OpenAIEmbeddings(), config=settings)
+documents = store.hybrid_search("database", k=4)
+```
+
+The automatically created fulltext index is `GLOBAL USING fulltext_relevance`
+on `column_map["document"]` with
+`WITH (tokenizer=standard, use_filter_lowercase=true)`. These tokenizer and
+normalization options are fixed in the integration. For different options,
+create a `fulltext_relevance` index directly on the document column and pass
+its name as `fulltext_index_name`. The store checks the indexed column and
+readiness of an existing index and runs a small hybrid query to validate its
+type and vector metric. It does not inspect tokenizer settings. The fulltext
+index follows subsequent writes automatically; the vector index is rebuilt
+after documents are added.
+
+### Query options
+
+`hybrid_search` and `ahybrid_search` use the same input text for fulltext
+matching and query embedding. Their query-time options are:
+
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `k` | `4` | Number of returned documents; must be a positive integer. |
+| `mode` | `"rrf"` | Fusion by reciprocal rank (`"rrf"`) or normalized weighted scores (`"linear"`). |
+| `weights` | `(1.0, 1.0)` | Non-negative weights in **(fulltext, vector)** order. |
+| `candidate_limits` | `None` | Positive candidate counts in **(fulltext, vector)** order. By default, YDB uses `k * 10` candidates per branch. |
+
+For example, this gives the vector branch twice the weight:
+
+```python
+store.hybrid_search(
+    "database", k=5, weights=(1.0, 2.0), candidate_limits=(50, 100)
+)
+retriever = store.as_hybrid_retriever(k=5, weights=(1.0, 2.0))
+```
+
+For asynchronous I/O, use `await AsyncYDB.create(embeddings, config=settings)`,
+`await store.ahybrid_search(...)`, and
+`await store.as_hybrid_retriever(k=4).ainvoke(...)`. Close the store with
+`await store.aclose()`.
+
+The ordinary `similarity_search` and `as_retriever()` remain vector-only. Use
+`as_hybrid_retriever()` for hybrid retrieval. This integration does not forward
+metadata `filter` in hybrid queries and raises `ValueError` if one is supplied.
+The API returns documents in fused order without a numeric fused score.
+
+The [basic example notebook](examples/basic_example.ipynb) compares vector and
+hybrid results on an existing table. The
+[local RAG wiki hybrid notebook](examples/local_rag_wiki_hybrid/Example.ipynb)
+shows both retrievers in a complete RAG workflow.
