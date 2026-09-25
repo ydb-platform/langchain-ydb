@@ -68,9 +68,8 @@ class YDBSettings:
         secure (bool) : Connect to server over secure connection. Defaults to False.
         database (str) : Database name to find the table. Defaults to '/local'.
         table (str) : Table name to operate on. Defaults to 'ydb_langchain_store'.
-        column_map (Dict) : Column type map to project column name onto langchain
-                            semantics. Must have keys: `text`, `id`, `vector`,
-                            must be same size to number of columns. For example:
+        column_map (Dict) : Map column names to LangChain roles. Must have keys
+                            `id`, `document`, `embedding`, and `metadata`. For example:
                             .. code-block:: python
 
                                 {
@@ -86,7 +85,8 @@ class YDBSettings:
                          'CosineDistance', 'ManhattanDistance',
                          'EuclideanDistance'). Defaults to 'CosineSimilarity'.
                          Enum `YDBSearchStrategy` contains all of them.
-        index_enabled (bool) : Enables usage of vector index. Default is False.
+        index_enabled (bool) : Enables usage of vector index. Also implied by
+                               hybrid_search_enabled. Default is False.
         index_name (str) : Name of vector index. Default is 'ydb_vector_index'.
         index_config_levels (int) : The number of levels in the tree, which determines
                                     the search depth (recommended 1–3). Default is 2.
@@ -100,7 +100,7 @@ class YDBSettings:
         vector_pass_as_bytes (bool) : Flag to pass vectors as bytes to YDB.
                                       Defaults to True.
         vector_dimension (int) : Optional embedding size for vector index DDL.
-            If set when ``index_enabled`` is True, skips probing embeddings
+            If set when a vector index is created or rebuilt, skips probing embeddings
             (avoids sync ``embed_query`` / async ``aembed_query`` at index build).
             Defaults to None (dimension inferred from a single probe embedding).
         hybrid_search_enabled (bool): Create any missing fulltext and vector indexes
