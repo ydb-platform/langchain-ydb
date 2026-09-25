@@ -419,4 +419,6 @@ by the native hybrid query and raises `ValueError`; the API returns documents
 in fused order without a numeric fused score.
 
 The [basic example notebook](examples/basic_example.ipynb) compares vector and
-hybrid results on an existing table.
+hybrid results on an existing table. The
+[local RAG wiki hybrid notebook](examples/local_rag_wiki_hybrid/Example.ipynb)
+shows both retrievers in a complete RAG workflow.
