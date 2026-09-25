@@ -73,44 +73,29 @@ await store.aclose()
 
 Sync methods on `AsyncYDB` are not supported; use `a*` APIs.
 
-### Hybrid search
+### Configuration
 
-On a YDB server that supports [HybridRank](https://ydb.tech/docs/en/dev/hybrid-search?version=main),
-hybrid search combines fulltext relevance and vector similarity over the **same
-table**. The text branch indexes `column_map["document"]`; the vector branch
-indexes `column_map["embedding"]`. Enabling the feature creates either missing
-index and waits for both indexes to be ready. This works for a new table and for
-a table that already contains documents. Existing documents are indexed in place;
-their embeddings are not recomputed.
+Pass a `YDBSettings` instance to `YDB` or `AsyncYDB`. The fields below control
+connections, table creation, and search. Defaults apply when a field is omitted.
 
-#### Configure the store
+#### Connection and table
 
-These `YDBSettings` fields control hybrid search and its indexes:
-
-| Field | Default | Effect |
+| Field | Default | Purpose |
 | --- | --- | --- |
-| `hybrid_search_enabled` | `False` | Enables the hybrid API and prepares both indexes when the store opens. It also enables the vector index for ordinary vector searches, so `index_enabled=True` is not required. |
-| `fulltext_index_name` | `"ydb_fulltext_index"` | Name of the `fulltext_relevance` index on the document column. Set it to the name of an existing index to reuse that index. Otherwise the store creates an index with this name. |
-| `hybrid_index_build_timeout` | `300.0` seconds | Time to wait for index readiness after issuing any creation statements. The statements themselves may take additional time. Increase it if backfilling a large table takes longer. A timeout raises `TimeoutError`; the indexes remain in the table. |
-| `database` | `"/local"` | Database containing the table. Use the same database as the existing store. |
-| `table` | `"ydb_langchain_store"` | Table to create or open in `database`. Use the existing table name when enabling hybrid search over stored documents. |
-| `drop_existing_table` | `False` | If `True`, deletes the table before opening it. Keep it `False` when enabling hybrid search on existing data. |
-| `index_enabled` | `False` | Enables indexed vector search independently of hybrid search. `hybrid_search_enabled=True` already implies it, so it can remain `False` for hybrid use. |
-| `index_name` | `"ydb_vector_index"` | Name of the `vector_kmeans_tree` index on the embedding column. Set it to the existing index name to reuse that index. |
-| `strategy` | `YDBSearchStrategy.COSINE_SIMILARITY` | Vector scoring function and index metric. Use the same strategy as an existing vector index. |
-| `index_config_levels` | `2` | K-means tree depth when a vector index is created or rebuilt. |
-| `index_config_clusters` | `128` | Number of clusters when a vector index is created or rebuilt. |
-| `index_tree_search_top_size` | `1` | `ydb.KMeansTreeSearchTopSize` for the vector branch at query time. Increase it to search more tree candidates. |
-| `vector_dimension` | `None` | Dimension for vector index creation or rebuild. When omitted, the store obtains it by calling the embedding model with `embed_query("index")` (or `aembed_query` for `AsyncYDB`). |
-| `vector_pass_as_bytes` | `True` | Passes document and query vectors to YDB as binary `String` values. With `False`, passes `List<Float>` and converts them to the binary format in YQL. |
-| `column_map` | `id`, `document`, `embedding`, `metadata` | Maps these four roles to columns in an existing table. The fulltext index uses the mapped document column and the vector index uses the mapped embedding column. |
+| `host` | `"localhost"` | YDB host. |
+| `port` | `2136` | gRPC port. |
+| `credentials` | `None` | Authentication; see [Credentials](#how-to-use-credentials) below. |
+| `secure` | `False` | Use `grpcs` instead of `grpc`. |
+| `database` | `"/local"` | Database containing the table. |
+| `table` | `"ydb_langchain_store"` | Table to create or open. |
+| `column_map` | `id`, `document`, `embedding`, `metadata` | Maps these four roles to table columns. Supply all four names for a custom schema. |
+| `drop_existing_table` | `False` | Drop and recreate the table when the store opens. Leave `False` to reuse existing data. |
 
-If an existing table uses different column names, pass all four role mappings:
+For a table with custom column names:
 
 ```python
 settings = YDBSettings(
     table="my_documents",
-    hybrid_search_enabled=True,
     column_map={
         "id": "doc_id",
         "document": "body",
@@ -120,92 +105,30 @@ settings = YDBSettings(
 )
 ```
 
-The automatically created fulltext index uses
-`GLOBAL USING fulltext_relevance` with
-`WITH (tokenizer=standard, use_filter_lowercase=true)`. The tokenizer, lowercase
-filter, and other fulltext index options are **not** `YDBSettings` fields. To use
-different tokenization or normalization options, create a `fulltext_relevance`
-index directly on the document column yourself and pass its name as
-`fulltext_index_name`. The store reuses an index with that name; it checks the
-indexed column and readiness but does not check the index type or tokenizer
-settings.
+#### Vector search and index
 
-For a new table:
-
-```python
-from langchain_openai import OpenAIEmbeddings
-from langchain_ydb.vectorstores import YDB, YDBSettings
-
-settings = YDBSettings(
-    table="my_documents",
-    hybrid_search_enabled=True,
-    vector_dimension=1536,  # set this to your model's embedding size
-)
-store = YDB(OpenAIEmbeddings(), config=settings)
-store.add_texts(["A document about databases"])
-
-documents = store.hybrid_search("database", k=4)
-retriever = store.as_hybrid_retriever(k=4)
-documents = retriever.invoke("database")
-```
-
-To enable hybrid search on an existing table, open it with
-`hybrid_search_enabled=True` and **leave `drop_existing_table=False`** (the
-default). Set `index_name` and `fulltext_index_name` if the existing indexes
-have custom names. A missing index is built over the existing rows; a ready
-index with the configured name is reused. For example:
-
-```python
-settings = YDBSettings(
-    table="my_documents",
-    hybrid_search_enabled=True,
-    index_name="existing_vector_index",
-    fulltext_index_name="document_relevance_index",
-    vector_dimension=1536,
-)
-store = YDB(OpenAIEmbeddings(), config=settings)
-documents = store.hybrid_search("database", k=4)
-```
-
-If you add documents after opening the store, the fulltext index follows those
-writes automatically and the vector index is rebuilt using the configured
-`strategy`, `index_config_levels`, `index_config_clusters`, and
-`vector_dimension`. Those creation settings do not alter an existing ready
-vector index merely by opening the store.
-
-For asynchronous I/O, use `await AsyncYDB.create(embeddings, config=settings)`,
-`await store.ahybrid_search(...)`, and
-`await store.as_hybrid_retriever(k=4).ainvoke(...)`. Close the store with
-`await store.aclose()`.
-
-#### Configure each query
-
-`hybrid_search` and `ahybrid_search` take the same text query for fulltext
-matching and embedding. Their query-time arguments are:
-
-| Argument | Default | Effect |
+| Field | Default | Purpose |
 | --- | --- | --- |
-| `k` | `4` | Number of returned documents. Must be a positive integer. |
-| `mode` | `"rrf"` | Fusion mode: reciprocal rank fusion (`"rrf"`) or normalized weighted scores (`"linear"`). |
-| `weights` | `(1.0, 1.0)` | Non-negative weights in **(fulltext, vector)** order. |
-| `candidate_limits` | `None` | Optional positive candidate counts in **(fulltext, vector)** order. By default, YDB uses `k * 10` candidates per branch. |
+| `strategy` | `YDBSearchStrategy.COSINE_SIMILARITY` | Vector scoring function and index metric. Match the metric of an existing index. |
+| `index_enabled` | `False` | Use a vector index for similarity search and rebuild it after writes. On a new table, the index is first created after adding documents. Hybrid search creates missing indexes when the store opens. |
+| `index_name` | `"ydb_vector_index"` | Vector index name; set it to the existing name when reusing an index. |
+| `index_config_levels` | `2` | K-means tree depth when a vector index is created or rebuilt. |
+| `index_config_clusters` | `128` | Number of clusters when a vector index is created or rebuilt. |
+| `index_tree_search_top_size` | `1` | `ydb.KMeansTreeSearchTopSize` for indexed vector queries, including the vector branch of hybrid search. Higher values search more tree candidates. |
+| `vector_dimension` | `None` | Embedding dimension for index creation or rebuild. If omitted when needed, it is inferred from `embed_query("index")` or `aembed_query("index")`. |
+| `vector_pass_as_bytes` | `True` | Pass document and query vectors as binary `String` values. With `False`, pass `List<Float>` and convert in YQL. |
 
-This gives the vector branch twice the weight:
+Index creation settings affect a new or rebuilt vector index. Opening a table
+with a ready index does not change that index. Adding documents rebuilds the
+vector index when `index_enabled` or `hybrid_search_enabled` is set.
 
-```python
-store.hybrid_search(
-    "database", k=5, weights=(1.0, 2.0), candidate_limits=(50, 100)
-)
-retriever = store.as_hybrid_retriever(k=5, weights=(1.0, 2.0))
-```
+#### Hybrid index setup
 
-`similarity_search` and the ordinary `as_retriever()` remain vector-only;
-use `as_hybrid_retriever()` for hybrid retrieval. Metadata `filter` is not
-supported by the native hybrid query and raises `ValueError`. The API returns
-documents in fused order, without a numeric fused score.
-
-The [basic example notebook](examples/basic_example.ipynb) compares vector and
-hybrid results and shows the hybrid retriever on an existing table.
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `hybrid_search_enabled` | `False` | Enable hybrid search and create any missing fulltext and vector indexes when opening a new or existing table. Implies indexed vector search even if `index_enabled=False`. |
+| `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
+| `hybrid_index_build_timeout` | `300.0` seconds | Time to wait for index readiness after issuing creation statements; the statements themselves may take additional time. A timeout raises `TimeoutError` and leaves created indexes in place. |
 
 #### How to use Credentials
 
@@ -406,3 +329,95 @@ results = retriever.invoke(
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
 ```
+
+## Hybrid search
+
+On a YDB server that supports [HybridRank](https://ydb.tech/docs/en/dev/hybrid-search?version=main),
+hybrid search combines fulltext relevance over the document column with vector
+similarity over the embedding column. Both indexes belong to the same table.
+Set `hybrid_search_enabled=True` to create missing indexes and wait until they
+are ready. Existing documents are indexed in place without recomputing their
+embeddings.
+
+### New table
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_ydb.vectorstores import YDB, YDBSettings
+
+settings = YDBSettings(
+    table="my_documents",
+    hybrid_search_enabled=True,
+    vector_dimension=1536,  # set this to your model's embedding size
+)
+store = YDB(OpenAIEmbeddings(), config=settings)
+store.add_texts(["A document about databases"])
+
+documents = store.hybrid_search("database", k=4)
+retriever = store.as_hybrid_retriever(k=4)
+documents = retriever.invoke("database")
+```
+
+### Existing table
+
+Open the same table with `hybrid_search_enabled=True` and leave
+`drop_existing_table=False` (the default). Set `index_name` and
+`fulltext_index_name` to the names of any indexes you want to reuse. Missing
+indexes are built over the existing rows; ready indexes with those names are
+reused.
+
+```python
+settings = YDBSettings(
+    table="my_documents",
+    hybrid_search_enabled=True,
+    index_name="existing_vector_index",
+    fulltext_index_name="document_relevance_index",
+    vector_dimension=1536,
+)
+store = YDB(OpenAIEmbeddings(), config=settings)
+documents = store.hybrid_search("database", k=4)
+```
+
+The automatically created fulltext index is `GLOBAL USING fulltext_relevance`
+on `column_map["document"]` with
+`WITH (tokenizer=standard, use_filter_lowercase=true)`. These tokenizer and
+normalization options are fixed in the integration. For different options,
+create a `fulltext_relevance` index directly on the document column and pass
+its name as `fulltext_index_name`. The store checks the indexed column and
+readiness of an existing index, but does not check its type or tokenizer
+settings. The fulltext index follows subsequent writes automatically; the
+vector index is rebuilt after documents are added.
+
+### Query options
+
+`hybrid_search` and `ahybrid_search` use the same input text for fulltext
+matching and query embedding. Their query-time options are:
+
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `k` | `4` | Number of returned documents; must be a positive integer. |
+| `mode` | `"rrf"` | Fusion by reciprocal rank (`"rrf"`) or normalized weighted scores (`"linear"`). |
+| `weights` | `(1.0, 1.0)` | Non-negative weights in **(fulltext, vector)** order. |
+| `candidate_limits` | `None` | Positive candidate counts in **(fulltext, vector)** order. By default, YDB uses `k * 10` candidates per branch. |
+
+For example, this gives the vector branch twice the weight:
+
+```python
+store.hybrid_search(
+    "database", k=5, weights=(1.0, 2.0), candidate_limits=(50, 100)
+)
+retriever = store.as_hybrid_retriever(k=5, weights=(1.0, 2.0))
+```
+
+For asynchronous I/O, use `await AsyncYDB.create(embeddings, config=settings)`,
+`await store.ahybrid_search(...)`, and
+`await store.as_hybrid_retriever(k=4).ainvoke(...)`. Close the store with
+`await store.aclose()`.
+
+The ordinary `similarity_search` and `as_retriever()` remain vector-only. Use
+`as_hybrid_retriever()` for hybrid retrieval. Metadata `filter` is unsupported
+by the native hybrid query and raises `ValueError`; the API returns documents
+in fused order without a numeric fused score.
+
+The [basic example notebook](examples/basic_example.ipynb) compares vector and
+hybrid results on an existing table.
