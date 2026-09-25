@@ -1,3 +1,4 @@
+## 0.1.0 ##
 * Add native YDB hybrid search and retrievers for new and existing vector stores
 
 ## 0.0.17 ##
