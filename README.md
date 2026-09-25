@@ -204,8 +204,8 @@ use `as_hybrid_retriever()` for hybrid retrieval. Metadata `filter` is not
 supported by the native hybrid query and raises `ValueError`. The API returns
 documents in fused order, without a numeric fused score.
 
-The [local RAG wiki notebook](examples/local_rag_wiki/Example.ipynb) compares
-vector and hybrid results and uses the hybrid retriever in a RAG chain.
+The [basic example notebook](examples/basic_example.ipynb) compares vector and
+hybrid results and shows the hybrid retriever on an existing table.
 
 #### How to use Credentials
 
