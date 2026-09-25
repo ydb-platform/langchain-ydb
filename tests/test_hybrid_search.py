@@ -1,5 +1,6 @@
 """Integration tests for native fulltext/vector search."""
 
+from types import SimpleNamespace
 from typing import Any, List
 
 import pytest
@@ -66,7 +67,7 @@ def test_hybrid_search_on_new_store(vector_pass_as_bytes: bool) -> None:
             "lexical",
             "semantic",
         ]
-        with pytest.raises(ValueError, match="Metadata filters"):
+        with pytest.raises(ValueError, match="hybrid metadata filters"):
             store.hybrid_search("needle", filter={"source": "text"})
     finally:
         store.drop()
@@ -98,6 +99,72 @@ def test_hybrid_search_on_existing_store(existing_vector_index: bool) -> None:
         assert "new" in {doc.id for doc in reopened.hybrid_search("needle", k=3)}
     finally:
         initial.drop()
+
+
+@pytest.mark.parametrize("incompatible_index", ["fulltext", "vector"])
+def test_reject_incompatible_existing_index(incompatible_index: str) -> None:
+    table = f"test_hybrid_incompatible_{incompatible_index}"
+    initial = YDB(
+        HybridEmbeddings(), config=_settings(table, drop_existing_table=True)
+    )
+    config = _settings(table, hybrid_search_enabled=True)
+    try:
+        if incompatible_index == "fulltext":
+            initial._execute_query(
+                initial._format_add_named_vector_index_query(2, config.index_name),
+                ddl=True,
+            )
+            initial._execute_query(
+                f"ALTER TABLE `{table}` ADD INDEX `{config.fulltext_index_name}` "
+                "GLOBAL USING fulltext_plain ON (`document`) "
+                "WITH (tokenizer=standard);",
+                ddl=True,
+            )
+        else:
+            initial._execute_query(initial._format_add_fulltext_index_query(), ddl=True)
+            initial._execute_query(
+                f"ALTER TABLE `{table}` ADD INDEX `{config.index_name}` "
+                "GLOBAL USING vector_kmeans_tree ON (embedding) "
+                "WITH (distance=euclidean, vector_type=\"Float\", "
+                "vector_dimension=2, levels=2, clusters=128);",
+                ddl=True,
+            )
+
+        with pytest.raises(ValueError, match="HybridRank validation failed"):
+            YDB(HybridEmbeddings(), config=config)
+    finally:
+        initial.drop()
+
+
+def test_hybrid_index_wait_has_deadline() -> None:
+    config = _settings(
+        "test_hybrid_never_ready",
+        hybrid_search_enabled=True,
+        hybrid_index_ready_timeout=0.01,
+    )
+    indexes = [
+        SimpleNamespace(
+            name=config.index_name,
+            index_columns=[config.column_map["embedding"]],
+            status=ydb.IndexStatus.BUILDING,
+        ),
+        SimpleNamespace(
+            name=config.fulltext_index_name,
+            index_columns=[config.column_map["document"]],
+            status=ydb.IndexStatus.READY,
+        ),
+    ]
+    table_client = SimpleNamespace(
+        describe_table=lambda _: SimpleNamespace(indexes=indexes)
+    )
+    store = object.__new__(YDB)
+    store.config = config
+    store.connection = SimpleNamespace(  # type: ignore[assignment]
+        _driver=SimpleNamespace(table_client=table_client)
+    )
+
+    with pytest.raises(TimeoutError, match="ydb_vector_index: BUILDING"):
+        store._ensure_hybrid_indexes()
 
 
 @pytest.mark.asyncio
@@ -144,3 +211,61 @@ async def test_async_hybrid_search_on_existing_store() -> None:
     finally:
         await initial.adrop()
         await initial.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_reject_incompatible_existing_fulltext_index() -> None:
+    table = "test_async_hybrid_incompatible_fulltext"
+    initial = YDB(
+        HybridEmbeddings(), config=_settings(table, drop_existing_table=True)
+    )
+    config = _settings(table, hybrid_search_enabled=True)
+    try:
+        initial._execute_query(
+            initial._format_add_named_vector_index_query(2, config.index_name),
+            ddl=True,
+        )
+        initial._execute_query(
+            f"ALTER TABLE `{table}` ADD INDEX `{config.fulltext_index_name}` "
+            "GLOBAL USING fulltext_plain ON (`document`) "
+            "WITH (tokenizer=standard);",
+            ddl=True,
+        )
+        with pytest.raises(ValueError, match="HybridRank validation failed"):
+            await AsyncYDB.create(HybridEmbeddings(), config=config)
+    finally:
+        initial.drop()
+
+
+@pytest.mark.asyncio
+async def test_async_hybrid_index_wait_has_deadline() -> None:
+    config = _settings(
+        "test_async_hybrid_never_ready",
+        hybrid_search_enabled=True,
+        hybrid_index_ready_timeout=0.01,
+    )
+    indexes = [
+        SimpleNamespace(
+            name=config.index_name,
+            index_columns=[config.column_map["embedding"]],
+            status=ydb.IndexStatus.BUILDING,
+        ),
+        SimpleNamespace(
+            name=config.fulltext_index_name,
+            index_columns=[config.column_map["document"]],
+            status=ydb.IndexStatus.READY,
+        ),
+    ]
+
+    async def describe_table(_: str) -> SimpleNamespace:
+        return SimpleNamespace(indexes=indexes)
+
+    table_client = SimpleNamespace(describe_table=describe_table)
+    store = object.__new__(AsyncYDB)
+    store.config = config
+    store.connection = SimpleNamespace(  # type: ignore[assignment]
+        _driver=SimpleNamespace(table_client=table_client)
+    )
+
+    with pytest.raises(TimeoutError, match="ydb_vector_index: BUILDING"):
+        await store._ensure_hybrid_indexes()

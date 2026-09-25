@@ -128,6 +128,7 @@ vector index when `index_enabled` or `hybrid_search_enabled` is set.
 | --- | --- | --- |
 | `hybrid_search_enabled` | `False` | Enable hybrid search and create any missing fulltext and vector indexes when opening a new or existing table. Implies indexed vector search even if `index_enabled=False`. |
 | `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
+| `hybrid_index_ready_timeout` | `3600.0` seconds | Maximum wait for both indexes to become ready after creation. If a build stays incomplete, opening the store raises `TimeoutError` with the current index states. Increase it for large existing tables. |
 
 #### How to use Credentials
 
@@ -302,6 +303,9 @@ for res, score in results:
 
 You can search with filters as described below:
 
+This works with the default linear scan. Indexed vector search (including a
+store with `hybrid_search_enabled=True`) rejects metadata filters.
+
 ```python
 results = vector_store.similarity_search_with_score(
     "What did I eat for breakfast?",
@@ -363,7 +367,9 @@ Open the same table with `hybrid_search_enabled=True` and leave
 `drop_existing_table=False` (the default). Set `index_name` and
 `fulltext_index_name` to the names of any indexes you want to reuse. Missing
 indexes are built over the existing rows; ready indexes with those names are
-reused.
+reused. When reusing an index, opening the store also embeds one probe query
+and runs a small hybrid search to check that YDB accepts the index types and
+vector metric.
 
 ```python
 settings = YDBSettings(
@@ -383,9 +389,10 @@ on `column_map["document"]` with
 normalization options are fixed in the integration. For different options,
 create a `fulltext_relevance` index directly on the document column and pass
 its name as `fulltext_index_name`. The store checks the indexed column and
-readiness of an existing index, but does not check its type or tokenizer
-settings. The fulltext index follows subsequent writes automatically; the
-vector index is rebuilt after documents are added.
+readiness of an existing index and runs a small hybrid query to validate its
+type and vector metric. It does not inspect tokenizer settings. The fulltext
+index follows subsequent writes automatically; the vector index is rebuilt
+after documents are added.
 
 ### Query options
 
@@ -414,9 +421,9 @@ For asynchronous I/O, use `await AsyncYDB.create(embeddings, config=settings)`,
 `await store.aclose()`.
 
 The ordinary `similarity_search` and `as_retriever()` remain vector-only. Use
-`as_hybrid_retriever()` for hybrid retrieval. Metadata `filter` is unsupported
-by the native hybrid query and raises `ValueError`; the API returns documents
-in fused order without a numeric fused score.
+`as_hybrid_retriever()` for hybrid retrieval. This integration does not forward
+metadata `filter` in hybrid queries and raises `ValueError` if one is supplied.
+The API returns documents in fused order without a numeric fused score.
 
 The [basic example notebook](examples/basic_example.ipynb) compares vector and
 hybrid results on an existing table. The

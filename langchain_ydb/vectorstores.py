@@ -107,6 +107,8 @@ class YDBSettings:
             when opening the store, including an existing table. Defaults to False.
         fulltext_index_name (str): Name of the fulltext relevance index used by
             hybrid search. Defaults to 'ydb_fulltext_index'.
+        hybrid_index_ready_timeout (float): Maximum seconds to wait for indexes
+            to become ready while opening a hybrid store. Defaults to 3600.
     """
 
     host: str = "localhost"
@@ -134,6 +136,7 @@ class YDBSettings:
     vector_dimension: Optional[int] = None
     hybrid_search_enabled: bool = False
     fulltext_index_name: str = "ydb_fulltext_index"
+    hybrid_index_ready_timeout: float = 3600.0
 
 
 _ASYNCYDB_SYNC_MSG = (
@@ -308,6 +311,11 @@ class _YDBStoreBase:
     def _validate_hybrid_settings(self) -> None:
         if self.config.index_name == self.config.fulltext_index_name:
             raise ValueError("Vector and fulltext index names must be different.")
+        if (
+            not math.isfinite(self.config.hybrid_index_ready_timeout)
+            or self.config.hybrid_index_ready_timeout <= 0
+        ):
+            raise ValueError("hybrid_index_ready_timeout must be finite and positive.")
 
     def _check_hybrid_indexes(self, indexes: list) -> bool:
         by_name = {index.name: index for index in indexes}
@@ -325,6 +333,13 @@ class _YDBStoreBase:
                     f"expected [{column!r}]."
                 )
         return all(by_name[name].status == ydb.IndexStatus.READY for name in expected)
+
+    def _hybrid_index_states(self, indexes: list) -> str:
+        by_name = {index.name: index for index in indexes}
+        return ", ".join(
+            f"{name}: {by_name[name].status.name if name in by_name else 'missing'}"
+            for name in (self.config.fulltext_index_name, self.config.index_name)
+        )
 
     def _prepare_hybrid_search_query(
         self,
@@ -604,7 +619,11 @@ class YDB(_YDBStoreBase, VectorStore):
 
         self._prepare_queries_after_schema()
         if self.config.hybrid_search_enabled:
-            self._ensure_hybrid_indexes()
+            try:
+                self._ensure_hybrid_indexes()
+            except Exception:
+                self.connection.close()
+                raise
 
     def _execute_query(
         self,
@@ -648,6 +667,9 @@ class YDB(_YDBStoreBase, VectorStore):
         indexes = table_client.describe_table(table_path).indexes
         self._check_hybrid_indexes(indexes)
         names = {index.name for index in indexes}
+        reused_index = bool(
+            {self.config.index_name, self.config.fulltext_index_name} & names
+        )
         if self.config.index_name not in names:
             dim = self._resolve_vector_dimension_sync()
             self._execute_query(
@@ -657,10 +679,33 @@ class YDB(_YDBStoreBase, VectorStore):
         if self.config.fulltext_index_name not in names:
             self._execute_query(self._format_add_fulltext_index_query(), ddl=True)
 
-        while not self._check_hybrid_indexes(
-            table_client.describe_table(table_path).indexes
-        ):
+        deadline = time.monotonic() + self.config.hybrid_index_ready_timeout
+        while True:
+            indexes = table_client.describe_table(table_path).indexes
+            if self._check_hybrid_indexes(indexes):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Hybrid indexes for {table_path} are not ready: "
+                    f"{self._hybrid_index_states(indexes)}"
+                )
             time.sleep(0.5)
+
+        if reused_index:
+            self._validate_hybrid_index_compatibility()
+
+    def _validate_hybrid_index_compatibility(self) -> None:
+        embedding = self.embedding_function.embed_query("index")
+        try:
+            self._execute_query(
+                self._prepare_hybrid_search_query(1, "rrf", (1.0, 1.0), (1, 1)),
+                params=self._hybrid_search_params("index", embedding),
+            )
+        except ydb_dbapi.DatabaseError as exc:
+            raise ValueError(
+                "HybridRank validation failed for the configured indexes. "
+                "Check fulltext_relevance, the vector metric, and server support."
+            ) from exc
 
     def add_embeddings(
         self,
@@ -941,7 +986,9 @@ class YDB(_YDBStoreBase, VectorStore):
         if not self.config.hybrid_search_enabled:
             raise ValueError("Set hybrid_search_enabled=True in YDBSettings first.")
         if filter is not None:
-            raise ValueError("Metadata filters are not supported by YDB HybridRank.")
+            raise ValueError(
+                "This integration does not forward hybrid metadata filters."
+            )
         statement = self._prepare_hybrid_search_query(
             k, mode, weights, candidate_limits
         )
@@ -1154,7 +1201,11 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         await self._execute_query_async(self._prepare_scheme_query(), ddl=True)
         self._prepare_queries_after_schema()
         if self.config.hybrid_search_enabled:
-            await self._ensure_hybrid_indexes()
+            try:
+                await self._ensure_hybrid_indexes()
+            except Exception:
+                await self.aclose()
+                raise
         return self
 
     @classmethod
@@ -1228,6 +1279,9 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         indexes = (await table_client.describe_table(table_path)).indexes
         self._check_hybrid_indexes(indexes)
         names = {index.name for index in indexes}
+        reused_index = bool(
+            {self.config.index_name, self.config.fulltext_index_name} & names
+        )
         if self.config.index_name not in names:
             dim = await self._resolve_vector_dimension_async()
             await self._execute_query_async(
@@ -1239,10 +1293,33 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
                 self._format_add_fulltext_index_query(), ddl=True
             )
 
-        while not self._check_hybrid_indexes(
-            (await table_client.describe_table(table_path)).indexes
-        ):
+        deadline = time.monotonic() + self.config.hybrid_index_ready_timeout
+        while True:
+            indexes = (await table_client.describe_table(table_path)).indexes
+            if self._check_hybrid_indexes(indexes):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Hybrid indexes for {table_path} are not ready: "
+                    f"{self._hybrid_index_states(indexes)}"
+                )
             await asyncio.sleep(0.5)
+
+        if reused_index:
+            await self._validate_hybrid_index_compatibility()
+
+    async def _validate_hybrid_index_compatibility(self) -> None:
+        embedding = await self.embedding_function.aembed_query("index")
+        try:
+            await self._execute_query_async(
+                self._prepare_hybrid_search_query(1, "rrf", (1.0, 1.0), (1, 1)),
+                params=self._hybrid_search_params("index", embedding),
+            )
+        except ydb_dbapi.DatabaseError as exc:
+            raise ValueError(
+                "HybridRank validation failed for the configured indexes. "
+                "Check fulltext_relevance, the vector metric, and server support."
+            ) from exc
 
     async def aadd_embeddings(
         self,
@@ -1506,7 +1583,9 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         if not self.config.hybrid_search_enabled:
             raise ValueError("Set hybrid_search_enabled=True in YDBSettings first.")
         if filter is not None:
-            raise ValueError("Metadata filters are not supported by YDB HybridRank.")
+            raise ValueError(
+                "This integration does not forward hybrid metadata filters."
+            )
         statement = self._prepare_hybrid_search_query(
             k, mode, weights, candidate_limits
         )
