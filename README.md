@@ -128,7 +128,6 @@ vector index when `index_enabled` or `hybrid_search_enabled` is set.
 | --- | --- | --- |
 | `hybrid_search_enabled` | `False` | Enable hybrid search and create any missing fulltext and vector indexes when opening a new or existing table. Implies indexed vector search even if `index_enabled=False`. |
 | `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
-| `hybrid_index_build_timeout` | `300.0` seconds | Time to wait for index readiness after issuing creation statements; the statements themselves may take additional time. A timeout raises `TimeoutError` and leaves created indexes in place. |
 
 #### How to use Credentials
 

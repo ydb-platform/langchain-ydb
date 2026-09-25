@@ -107,8 +107,6 @@ class YDBSettings:
             when opening the store, including an existing table. Defaults to False.
         fulltext_index_name (str): Name of the fulltext relevance index used by
             hybrid search. Defaults to 'ydb_fulltext_index'.
-        hybrid_index_build_timeout (float): Seconds to wait for both indexes to
-            become ready when opening the store. Defaults to 300.
     """
 
     host: str = "localhost"
@@ -136,7 +134,6 @@ class YDBSettings:
     vector_dimension: Optional[int] = None
     hybrid_search_enabled: bool = False
     fulltext_index_name: str = "ydb_fulltext_index"
-    hybrid_index_build_timeout: float = 300.0
 
 
 _ASYNCYDB_SYNC_MSG = (
@@ -311,11 +308,6 @@ class _YDBStoreBase:
     def _validate_hybrid_settings(self) -> None:
         if self.config.index_name == self.config.fulltext_index_name:
             raise ValueError("Vector and fulltext index names must be different.")
-        if (
-            not math.isfinite(self.config.hybrid_index_build_timeout)
-            or self.config.hybrid_index_build_timeout <= 0
-        ):
-            raise ValueError("hybrid_index_build_timeout must be finite and positive.")
 
     def _check_hybrid_indexes(self, indexes: list) -> bool:
         by_name = {index.name: index for index in indexes}
@@ -665,12 +657,9 @@ class YDB(_YDBStoreBase, VectorStore):
         if self.config.fulltext_index_name not in names:
             self._execute_query(self._format_add_fulltext_index_query(), ddl=True)
 
-        deadline = time.monotonic() + self.config.hybrid_index_build_timeout
         while not self._check_hybrid_indexes(
             table_client.describe_table(table_path).indexes
         ):
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"Hybrid indexes for {table_path} are not ready.")
             time.sleep(0.5)
 
     def add_embeddings(
@@ -1250,12 +1239,9 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
                 self._format_add_fulltext_index_query(), ddl=True
             )
 
-        deadline = time.monotonic() + self.config.hybrid_index_build_timeout
         while not self._check_hybrid_indexes(
             (await table_client.describe_table(table_path)).indexes
         ):
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"Hybrid indexes for {table_path} are not ready.")
             await asyncio.sleep(0.5)
 
     async def aadd_embeddings(
