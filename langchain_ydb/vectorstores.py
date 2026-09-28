@@ -108,12 +108,12 @@ class YDBSettings:
             when opening the store, including an existing table. Defaults to False.
         fulltext_index_name (str): Name of the fulltext relevance index used by
             fulltext and hybrid search. Defaults to 'ydb_fulltext_index'.
+        hybrid_index_ready_timeout (float): Maximum seconds to wait for indexes
+            to become ready while opening a hybrid store. Defaults to 3600.
         fulltext_index_enabled (bool): Prepare a fulltext relevance index without
             requiring a vector index. Defaults to False.
         fulltext_index_ready_timeout (float): Maximum seconds to wait for the
             fulltext index when opening the store. Defaults to 3600.
-        hybrid_index_ready_timeout (float): Maximum seconds to wait for indexes
-            to become ready while opening a hybrid store. Defaults to 3600.
     """
 
     host: str = "localhost"
@@ -141,15 +141,19 @@ class YDBSettings:
     vector_dimension: Optional[int] = None
     hybrid_search_enabled: bool = False
     fulltext_index_name: str = "ydb_fulltext_index"
+    hybrid_index_ready_timeout: float = 3600.0
     fulltext_index_enabled: bool = False
     fulltext_index_ready_timeout: float = 3600.0
-    hybrid_index_ready_timeout: float = 3600.0
 
 
 _ASYNCYDB_SYNC_MSG = (
     "AsyncYDB is asyncio-only; use await aadd_texts, await asimilarity_search, "
-    "await afulltext_search, await AsyncYDB.afrom_texts, or use YDB for "
-    "synchronous I/O."
+    "await AsyncYDB.afrom_texts, or use YDB for synchronous I/O."
+)
+
+_ASYNCYDB_FULLTEXT_SYNC_MSG = (
+    "AsyncYDB is asyncio-only; use await afulltext_match or "
+    "await afulltext_search."
 )
 
 
@@ -1769,15 +1773,15 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
     def fulltext_match(self, query: str, k: int = 4) -> list[Document]:
-        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+        raise NotImplementedError(_ASYNCYDB_FULLTEXT_SYNC_MSG)
 
     def fulltext_search_with_score(
         self, query: str, k: int = 4
     ) -> list[tuple[Document, float]]:
-        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+        raise NotImplementedError(_ASYNCYDB_FULLTEXT_SYNC_MSG)
 
     def fulltext_search(self, query: str, k: int = 4) -> list[Document]:
-        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+        raise NotImplementedError(_ASYNCYDB_FULLTEXT_SYNC_MSG)
 
     def drop(self) -> None:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
