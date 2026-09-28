@@ -130,6 +130,14 @@ vector index when `index_enabled` or `hybrid_search_enabled` is set.
 | `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
 | `hybrid_index_ready_timeout` | `3600.0` seconds | Maximum wait for both indexes to become ready after creation. If a build stays incomplete, opening the store raises `TimeoutError` with the current index states. Increase it for large existing tables. |
 
+#### JSON metadata index setup
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `json_index_enabled` | `False` | Create or reuse a JSON index on the mapped `metadata` column when opening the store. |
+| `json_index_name` | `"ydb_metadata_index"` | Name of the JSON index to create or reuse. |
+| `json_index_ready_timeout` | `3600.0` seconds | Maximum wait for the JSON index to become ready. |
+
 #### How to use Credentials
 
 To use `YDB` credentials pass a `credentials` value into `YDBSettings`.
@@ -332,6 +340,49 @@ results = retriever.invoke(
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
 ```
+
+## JSON metadata index search
+
+An optional [YDB JSON index](https://ydb.tech/docs/ru/dev/json-indexes?version=main)
+can search the store's `metadata` column by JsonPath. Enable it when opening a
+new or existing table; no vector index is required:
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_ydb.vectorstores import YDB, YDBSettings
+
+store = YDB(
+    OpenAIEmbeddings(),
+    config=YDBSettings(table="my_documents", json_index_enabled=True),
+)
+store.add_texts(
+    ["A document about databases"],
+    metadatas=[{"source": "wiki", "active": True}],
+)
+
+documents = store.metadata_exists("$.source")
+documents = store.metadata_equals("$.source", "wiki")
+documents = store.metadata_equals("$.active", True)
+```
+
+`metadata_exists` uses `JSON_EXISTS`; `metadata_equals` uses `JSON_VALUE` with
+an explicit `RETURNING` type for strings, integers, and finite floats. Those
+values are query parameters. Boolean equality uses a `JSON_EXISTS` path
+predicate with a fixed `true` or `false` literal. Paths are limited to simple
+dotted names such as `$.source` or
+`$.user.region`. The returned documents have no guaranteed order. For
+`AsyncYDB`, use `ametadata_exists` and `ametadata_equals`.
+
+These are separate metadata lookups. They do not change the `filter` argument
+of vector similarity search or combine the JSON index with hybrid ranking in
+one query. `YDB` still takes an embedding model because it implements the
+LangChain `VectorStore` interface, but these metadata queries do not call it.
+
+**Server compatibility:** The documented YDB 26.3 JSON index requires a
+single integer primary key, while this store uses a `Utf8` document ID. A
+current local YDB build can create and query this index with `Utf8` IDs, but
+other server versions may reject index creation. In that case, opening with
+`json_index_enabled=True` raises an error with the YDB failure as its cause.
 
 ## Hybrid search
 

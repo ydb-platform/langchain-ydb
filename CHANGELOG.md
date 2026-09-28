@@ -1,3 +1,5 @@
+* Add opt-in JSON index searches for document metadata
+
 ## 0.1.0 ##
 * Add native YDB hybrid search and retrievers for new and existing vector stores
 

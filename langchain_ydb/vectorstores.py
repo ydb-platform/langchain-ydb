@@ -5,6 +5,7 @@ import enum
 import json
 import logging
 import math
+import re
 import struct
 import time
 from dataclasses import dataclass, field
@@ -109,6 +110,12 @@ class YDBSettings:
             hybrid search. Defaults to 'ydb_fulltext_index'.
         hybrid_index_ready_timeout (float): Maximum seconds to wait for indexes
             to become ready while opening a hybrid store. Defaults to 3600.
+        json_index_enabled (bool): Create or reuse a JSON index on the metadata
+            column when opening the store. Defaults to False.
+        json_index_name (str): Name of the metadata JSON index. Defaults to
+            'ydb_metadata_index'.
+        json_index_ready_timeout (float): Maximum seconds to wait for the JSON
+            index to become ready. Defaults to 3600.
     """
 
     host: str = "localhost"
@@ -137,11 +144,19 @@ class YDBSettings:
     hybrid_search_enabled: bool = False
     fulltext_index_name: str = "ydb_fulltext_index"
     hybrid_index_ready_timeout: float = 3600.0
+    json_index_enabled: bool = False
+    json_index_name: str = "ydb_metadata_index"
+    json_index_ready_timeout: float = 3600.0
 
 
 _ASYNCYDB_SYNC_MSG = (
     "AsyncYDB is asyncio-only; use await aadd_texts, await asimilarity_search, "
     "await AsyncYDB.afrom_texts, or use YDB for synchronous I/O."
+)
+
+_ASYNCYDB_JSON_SYNC_MSG = (
+    "AsyncYDB is asyncio-only; use await ametadata_exists or "
+    "await ametadata_equals."
 )
 
 
@@ -340,6 +355,102 @@ class _YDBStoreBase:
             f"{name}: {by_name[name].status.name if name in by_name else 'missing'}"
             for name in (self.config.fulltext_index_name, self.config.index_name)
         )
+
+    def _format_add_json_index_query(self) -> str:
+        return f"""
+        ALTER TABLE `{self.config.table}`
+        ADD INDEX `{self.config.json_index_name}`
+        GLOBAL USING json ON (`{self.config.column_map['metadata']}`);
+        """
+
+    def _validate_json_index_settings(self) -> None:
+        if (
+            not math.isfinite(self.config.json_index_ready_timeout)
+            or self.config.json_index_ready_timeout <= 0
+        ):
+            raise ValueError("json_index_ready_timeout must be finite and positive.")
+
+    def _check_json_index(self, indexes: list) -> bool:
+        index = next(
+            (i for i in indexes if i.name == self.config.json_index_name), None
+        )
+        if index is None:
+            return False
+        expected = [self.config.column_map["metadata"]]
+        if index.index_columns != expected:
+            raise ValueError(
+                f"Index {index.name!r} indexes {index.index_columns!r}, "
+                f"expected {expected!r}."
+            )
+        return index.status == ydb.IndexStatus.READY
+
+    def _validate_json_index_type(self, create_query: str) -> None:
+        name = re.escape(self.config.json_index_name)
+        pattern = rf"INDEX\s+`{name}`\s+GLOBAL(?:\s+SYNC)?\s+USING\s+json\b"
+        if not re.search(pattern, create_query, flags=re.IGNORECASE):
+            raise ValueError(
+                f"Index {self.config.json_index_name!r} must use the JSON index type."
+            )
+
+    def _require_json_index(self) -> None:
+        if not self.config.json_index_enabled:
+            raise ValueError("Set json_index_enabled=True in YDBSettings first.")
+
+    @staticmethod
+    def _json_path_literal(path: str, boolean_value: Optional[bool] = None) -> str:
+        if not isinstance(path, str) or not re.fullmatch(
+            r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
+            path,
+        ):
+            raise ValueError("path must be a simple JsonPath such as '$.user.name'.")
+        if boolean_value is not None:
+            path += f" ? (@ == {'true' if boolean_value else 'false'})"
+        return json.dumps(path)
+
+    @staticmethod
+    def _json_value_type(value: Any) -> tuple[str, ydb.PrimitiveType]:
+        if isinstance(value, str):
+            return "Utf8", ydb.PrimitiveType.Utf8
+        if isinstance(value, int):
+            if not -(2**63) <= value < 2**63:
+                raise ValueError("Integer metadata values must fit in Int64.")
+            return "Int64", ydb.PrimitiveType.Int64
+        if isinstance(value, float) and math.isfinite(value):
+            return "Double", ydb.PrimitiveType.Double
+        raise TypeError("value must be a string, boolean, finite float, or Int64.")
+
+    def _prepare_json_index_query(
+        self,
+        path: str,
+        k: int,
+        *,
+        value_type: Optional[str] = None,
+        boolean_value: Optional[bool] = None,
+    ) -> str:
+        if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+            raise ValueError("k must be a positive integer.")
+        path_literal = self._json_path_literal(path, boolean_value)
+        cols = self.config.column_map
+        metadata = f"`{cols['metadata']}`"
+        if boolean_value is not None or value_type is None:
+            declaration = ""
+            predicate = f"JSON_EXISTS({metadata}, {path_literal})"
+        else:
+            declaration = f"DECLARE $value AS {value_type};"
+            predicate = (
+                f"JSON_VALUE({metadata}, {path_literal} "
+                f"RETURNING {value_type}) = $value"
+            )
+        return f"""
+        {declaration}
+        SELECT
+            `{cols['id']}` AS id,
+            `{cols['document']}` AS document,
+            {metadata} AS metadata
+        FROM `{self.config.table}` VIEW `{self.config.json_index_name}`
+        WHERE {predicate}
+        LIMIT {k};
+        """
 
     def _prepare_hybrid_search_query(
         self,
@@ -618,9 +729,12 @@ class YDB(_YDBStoreBase, VectorStore):
         self._execute_query(self._prepare_scheme_query(), ddl=True)
 
         self._prepare_queries_after_schema()
-        if self.config.hybrid_search_enabled:
+        if self.config.hybrid_search_enabled or self.config.json_index_enabled:
             try:
-                self._ensure_hybrid_indexes()
+                if self.config.hybrid_search_enabled:
+                    self._ensure_hybrid_indexes()
+                if self.config.json_index_enabled:
+                    self._ensure_json_index()
             except Exception:
                 self.connection.close()
                 raise
@@ -706,6 +820,45 @@ class YDB(_YDBStoreBase, VectorStore):
                 "HybridRank validation failed for the configured indexes. "
                 "Check fulltext_relevance, the vector metric, and server support."
             ) from exc
+
+    def _ensure_json_index(self) -> None:
+        self._validate_json_index_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = table_client.describe_table(table_path).indexes
+        self._check_json_index(indexes)
+        reused = any(i.name == self.config.json_index_name for i in indexes)
+        if not reused:
+            try:
+                self._execute_query(self._format_add_json_index_query(), ddl=True)
+            except ydb_dbapi.DatabaseError as exc:
+                raise RuntimeError(
+                    "YDB rejected creation of the metadata JSON index. The "
+                    "server may not support JSON indexes on Utf8 primary keys."
+                ) from exc
+
+        deadline = time.monotonic() + self.config.json_index_ready_timeout
+        while True:
+            indexes = table_client.describe_table(table_path).indexes
+            if self._check_json_index(indexes):
+                break
+            if time.monotonic() >= deadline:
+                index = next(
+                    (i for i in indexes if i.name == self.config.json_index_name),
+                    None,
+                )
+                state = index.status.name if index is not None else "missing"
+                raise TimeoutError(
+                    f"JSON index {self.config.json_index_name!r} for "
+                    f"{table_path} is not ready: {state}"
+                )
+            time.sleep(0.5)
+
+        if reused:
+            create_query = self._execute_query(
+                f"SHOW CREATE TABLE `{self.config.table}`;"
+            )[0]["CreateQuery"]
+            self._validate_json_index_type(create_query)
 
     def add_embeddings(
         self,
@@ -956,6 +1109,51 @@ class YDB(_YDBStoreBase, VectorStore):
         res = self._execute_query(self._prepare_get_by_ids_query(), params=params)
         return self._docs_by_input_order(res, id_list)
 
+    def metadata_exists(self, path: str, k: int = 4) -> list[Document]:
+        """Find documents for which a simple JsonPath exists in metadata."""
+        self._require_json_index()
+        rows = self._execute_query(self._prepare_json_index_query(path, k))
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    def metadata_equals(
+        self, path: str, value: Any, k: int = 4
+    ) -> list[Document]:
+        """Find documents whose metadata value at a JsonPath equals `value`."""
+        self._require_json_index()
+        if isinstance(value, bool):
+            rows = self._execute_query(
+                self._prepare_json_index_query(path, k, boolean_value=value)
+            )
+        else:
+            value_type, sdk_type = self._json_value_type(value)
+            rows = self._execute_query(
+                self._prepare_json_index_query(path, k, value_type=value_type),
+                params={"$value": (value, sdk_type)},
+            )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    async def ametadata_exists(self, path: str, k: int = 4) -> list[Document]:
+        return await asyncio.to_thread(self.metadata_exists, path, k)
+
+    async def ametadata_equals(
+        self, path: str, value: Any, k: int = 4
+    ) -> list[Document]:
+        return await asyncio.to_thread(self.metadata_equals, path, value, k)
+
     def similarity_search(
         self, query: str, k: int = 4, filter: Optional[dict] = None, **kwargs: Any
     ) -> list[Document]:
@@ -1200,9 +1398,12 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             await self.adrop()
         await self._execute_query_async(self._prepare_scheme_query(), ddl=True)
         self._prepare_queries_after_schema()
-        if self.config.hybrid_search_enabled:
+        if self.config.hybrid_search_enabled or self.config.json_index_enabled:
             try:
-                await self._ensure_hybrid_indexes()
+                if self.config.hybrid_search_enabled:
+                    await self._ensure_hybrid_indexes()
+                if self.config.json_index_enabled:
+                    await self._ensure_json_index()
             except Exception:
                 await self.aclose()
                 raise
@@ -1320,6 +1521,49 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
                 "HybridRank validation failed for the configured indexes. "
                 "Check fulltext_relevance, the vector metric, and server support."
             ) from exc
+
+    async def _ensure_json_index(self) -> None:
+        self._validate_json_index_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = (await table_client.describe_table(table_path)).indexes
+        self._check_json_index(indexes)
+        reused = any(i.name == self.config.json_index_name for i in indexes)
+        if not reused:
+            try:
+                await self._execute_query_async(
+                    self._format_add_json_index_query(), ddl=True
+                )
+            except ydb_dbapi.DatabaseError as exc:
+                raise RuntimeError(
+                    "YDB rejected creation of the metadata JSON index. The "
+                    "server may not support JSON indexes on Utf8 primary keys."
+                ) from exc
+
+        deadline = time.monotonic() + self.config.json_index_ready_timeout
+        while True:
+            indexes = (await table_client.describe_table(table_path)).indexes
+            if self._check_json_index(indexes):
+                break
+            if time.monotonic() >= deadline:
+                index = next(
+                    (i for i in indexes if i.name == self.config.json_index_name),
+                    None,
+                )
+                state = index.status.name if index is not None else "missing"
+                raise TimeoutError(
+                    f"JSON index {self.config.json_index_name!r} for "
+                    f"{table_path} is not ready: {state}"
+                )
+            await asyncio.sleep(0.5)
+
+        if reused:
+            create_query = (
+                await self._execute_query_async(
+                    f"SHOW CREATE TABLE `{self.config.table}`;"
+                )
+            )[0]["CreateQuery"]
+            self._validate_json_index_type(create_query)
 
     async def aadd_embeddings(
         self,
@@ -1537,6 +1781,14 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
+    def metadata_exists(self, path: str, k: int = 4) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_JSON_SYNC_MSG)
+
+    def metadata_equals(
+        self, path: str, value: Any, k: int = 4
+    ) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_JSON_SYNC_MSG)
+
     def drop(self) -> None:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
@@ -1556,6 +1808,43 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             self._prepare_get_by_ids_query(), params=params
         )
         return self._docs_by_input_order(res, id_list)
+
+    async def ametadata_exists(self, path: str, k: int = 4) -> list[Document]:
+        self._require_json_index()
+        rows = await self._execute_query_async(
+            self._prepare_json_index_query(path, k)
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    async def ametadata_equals(
+        self, path: str, value: Any, k: int = 4
+    ) -> list[Document]:
+        self._require_json_index()
+        if isinstance(value, bool):
+            rows = await self._execute_query_async(
+                self._prepare_json_index_query(path, k, boolean_value=value)
+            )
+        else:
+            value_type, sdk_type = self._json_value_type(value)
+            rows = await self._execute_query_async(
+                self._prepare_json_index_query(path, k, value_type=value_type),
+                params={"$value": (value, sdk_type)},
+            )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
 
     async def asimilarity_search(
         self,
