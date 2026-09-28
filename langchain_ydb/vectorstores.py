@@ -151,8 +151,12 @@ class YDBSettings:
 
 _ASYNCYDB_SYNC_MSG = (
     "AsyncYDB is asyncio-only; use await aadd_texts, await asimilarity_search, "
-    "await ametadata_exists / ametadata_equals, await AsyncYDB.afrom_texts, "
-    "or use YDB for synchronous I/O."
+    "await AsyncYDB.afrom_texts, or use YDB for synchronous I/O."
+)
+
+_ASYNCYDB_JSON_SYNC_MSG = (
+    "AsyncYDB is asyncio-only; use await ametadata_exists or "
+    "await ametadata_equals."
 )
 
 
@@ -1778,12 +1782,12 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
     def metadata_exists(self, path: str, k: int = 4) -> list[Document]:
-        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+        raise NotImplementedError(_ASYNCYDB_JSON_SYNC_MSG)
 
     def metadata_equals(
         self, path: str, value: Any, k: int = 4
     ) -> list[Document]:
-        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+        raise NotImplementedError(_ASYNCYDB_JSON_SYNC_MSG)
 
     def drop(self) -> None:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
