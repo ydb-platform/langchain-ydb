@@ -5,6 +5,7 @@ import enum
 import json
 import logging
 import math
+import re
 import struct
 import time
 from dataclasses import dataclass, field
@@ -106,7 +107,11 @@ class YDBSettings:
         hybrid_search_enabled (bool): Create any missing fulltext and vector indexes
             when opening the store, including an existing table. Defaults to False.
         fulltext_index_name (str): Name of the fulltext relevance index used by
-            hybrid search. Defaults to 'ydb_fulltext_index'.
+            fulltext and hybrid search. Defaults to 'ydb_fulltext_index'.
+        fulltext_index_enabled (bool): Prepare a fulltext relevance index without
+            requiring a vector index. Defaults to False.
+        fulltext_index_ready_timeout (float): Maximum seconds to wait for the
+            fulltext index when opening the store. Defaults to 3600.
         hybrid_index_ready_timeout (float): Maximum seconds to wait for indexes
             to become ready while opening a hybrid store. Defaults to 3600.
     """
@@ -136,12 +141,15 @@ class YDBSettings:
     vector_dimension: Optional[int] = None
     hybrid_search_enabled: bool = False
     fulltext_index_name: str = "ydb_fulltext_index"
+    fulltext_index_enabled: bool = False
+    fulltext_index_ready_timeout: float = 3600.0
     hybrid_index_ready_timeout: float = 3600.0
 
 
 _ASYNCYDB_SYNC_MSG = (
     "AsyncYDB is asyncio-only; use await aadd_texts, await asimilarity_search, "
-    "await AsyncYDB.afrom_texts, or use YDB for synchronous I/O."
+    "await afulltext_search, await AsyncYDB.afrom_texts, or use YDB for "
+    "synchronous I/O."
 )
 
 
@@ -339,6 +347,91 @@ class _YDBStoreBase:
         return ", ".join(
             f"{name}: {by_name[name].status.name if name in by_name else 'missing'}"
             for name in (self.config.fulltext_index_name, self.config.index_name)
+        )
+
+    def _check_fulltext_index(self, indexes: list) -> bool:
+        index = next(
+            (i for i in indexes if i.name == self.config.fulltext_index_name), None
+        )
+        if index is None:
+            return False
+        expected = [self.config.column_map["document"]]
+        if index.index_columns != expected:
+            raise ValueError(
+                f"Index {index.name!r} indexes {index.index_columns!r}, "
+                f"expected {expected!r}."
+            )
+        return index.status == ydb.IndexStatus.READY
+
+    def _fulltext_index_state(self, indexes: list) -> str:
+        index = next(
+            (i for i in indexes if i.name == self.config.fulltext_index_name), None
+        )
+        return index.status.name if index is not None else "missing"
+
+    def _validate_fulltext_index_type(self, create_query: str) -> None:
+        name = re.escape(self.config.fulltext_index_name)
+        pattern = (
+            rf"INDEX\s+`{name}`\s+GLOBAL(?:\s+SYNC)?"
+            r"\s+USING\s+fulltext_relevance\b"
+        )
+        if not re.search(pattern, create_query, flags=re.IGNORECASE):
+            raise ValueError(
+                f"Index {self.config.fulltext_index_name!r} must use "
+                "fulltext_relevance for BM25 scoring."
+            )
+
+    def _validate_fulltext_settings(self) -> None:
+        if (
+            not math.isfinite(self.config.fulltext_index_ready_timeout)
+            or self.config.fulltext_index_ready_timeout <= 0
+        ):
+            raise ValueError(
+                "fulltext_index_ready_timeout must be finite and positive."
+            )
+
+    def _require_fulltext_index(self) -> None:
+        if not (
+            self.config.fulltext_index_enabled or self.config.hybrid_search_enabled
+        ):
+            raise ValueError(
+                "Set fulltext_index_enabled=True or hybrid_search_enabled=True "
+                "in YDBSettings first."
+            )
+
+    def _prepare_fulltext_query(self, k: int, *, scored: bool) -> str:
+        if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+            raise ValueError("k must be a positive integer.")
+        cols = self.config.column_map
+        text_col = f"`{cols['document']}`"
+        score = f"FulltextScore({text_col}, $query_text)"
+        select_score = f", {score} AS score" if scored else ""
+        predicate = (
+            f"{score} > 0" if scored else f"FulltextMatch({text_col}, $query_text)"
+        )
+        order = "ORDER BY score DESC" if scored else ""
+        return f"""
+        DECLARE $query_text AS Utf8;
+        SELECT
+            `{cols['id']}` AS id,
+            `{cols['document']}` AS document,
+            `{cols['metadata']}` AS metadata{select_score}
+        FROM `{self.config.table}` VIEW `{self.config.fulltext_index_name}`
+        WHERE {predicate}
+        {order}
+        LIMIT {k};
+        """
+
+    @staticmethod
+    def _fulltext_params(query: str) -> dict:
+        return {"$query_text": (query, ydb.PrimitiveType.Utf8)}
+
+    def as_fulltext_retriever(self, **search_kwargs: Any) -> YDBFullTextRetriever:
+        """Return a BM25-ranked LangChain retriever for the fulltext index."""
+        self._require_fulltext_index()
+        return YDBFullTextRetriever(
+            vectorstore=cast(Union[YDB, AsyncYDB], self),
+            search_kwargs=search_kwargs,
         )
 
     def _prepare_hybrid_search_query(
@@ -618,9 +711,12 @@ class YDB(_YDBStoreBase, VectorStore):
         self._execute_query(self._prepare_scheme_query(), ddl=True)
 
         self._prepare_queries_after_schema()
-        if self.config.hybrid_search_enabled:
+        if self.config.hybrid_search_enabled or self.config.fulltext_index_enabled:
             try:
-                self._ensure_hybrid_indexes()
+                if self.config.hybrid_search_enabled:
+                    self._ensure_hybrid_indexes()
+                else:
+                    self._ensure_fulltext_index()
             except Exception:
                 self.connection.close()
                 raise
@@ -706,6 +802,44 @@ class YDB(_YDBStoreBase, VectorStore):
                 "HybridRank validation failed for the configured indexes. "
                 "Check fulltext_relevance, the vector metric, and server support."
             ) from exc
+
+    def _ensure_fulltext_index(self) -> None:
+        self._validate_fulltext_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = table_client.describe_table(table_path).indexes
+        self._check_fulltext_index(indexes)
+        reused = any(i.name == self.config.fulltext_index_name for i in indexes)
+        if not reused:
+            self._execute_query(self._format_add_fulltext_index_query(), ddl=True)
+
+        deadline = time.monotonic() + self.config.fulltext_index_ready_timeout
+        while True:
+            indexes = table_client.describe_table(table_path).indexes
+            if self._check_fulltext_index(indexes):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Fulltext index {self.config.fulltext_index_name!r} for "
+                    f"{table_path} is not ready: {self._fulltext_index_state(indexes)}"
+                )
+            time.sleep(0.5)
+
+        if reused:
+            create_query = self._execute_query(
+                f"SHOW CREATE TABLE `{self.config.table}`;"
+            )[0]["CreateQuery"]
+            self._validate_fulltext_index_type(create_query)
+            try:
+                self._execute_query(
+                    self._prepare_fulltext_query(1, scored=True),
+                    params=self._fulltext_params("index"),
+                )
+            except ydb_dbapi.DatabaseError as exc:
+                raise ValueError(
+                    "The configured index cannot be used for FulltextScore. "
+                    "It must be a fulltext_relevance index."
+                ) from exc
 
     def add_embeddings(
         self,
@@ -956,6 +1090,58 @@ class YDB(_YDBStoreBase, VectorStore):
         res = self._execute_query(self._prepare_get_by_ids_query(), params=params)
         return self._docs_by_input_order(res, id_list)
 
+    def fulltext_match(self, query: str, k: int = 4) -> list[Document]:
+        """Return documents matched by the fulltext index, without ranking."""
+        self._require_fulltext_index()
+        rows = self._execute_query(
+            self._prepare_fulltext_query(k, scored=False),
+            params=self._fulltext_params(query),
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    def fulltext_search_with_score(
+        self, query: str, k: int = 4
+    ) -> list[tuple[Document, float]]:
+        """Return documents and their BM25 relevance scores."""
+        self._require_fulltext_index()
+        rows = self._execute_query(
+            self._prepare_fulltext_query(k, scored=True),
+            params=self._fulltext_params(query),
+        )
+        return [
+            (
+                Document(
+                    page_content=row["document"],
+                    metadata=self._parse_metadata(row["metadata"]),
+                    id=row["id"],
+                ),
+                row["score"],
+            )
+            for row in rows
+        ]
+
+    def fulltext_search(self, query: str, k: int = 4) -> list[Document]:
+        """Return documents ordered by BM25 relevance."""
+        return [doc for doc, _ in self.fulltext_search_with_score(query, k)]
+
+    async def afulltext_match(self, query: str, k: int = 4) -> list[Document]:
+        return await asyncio.to_thread(self.fulltext_match, query, k)
+
+    async def afulltext_search_with_score(
+        self, query: str, k: int = 4
+    ) -> list[tuple[Document, float]]:
+        return await asyncio.to_thread(self.fulltext_search_with_score, query, k)
+
+    async def afulltext_search(self, query: str, k: int = 4) -> list[Document]:
+        return await asyncio.to_thread(self.fulltext_search, query, k)
+
     def similarity_search(
         self, query: str, k: int = 4, filter: Optional[dict] = None, **kwargs: Any
     ) -> list[Document]:
@@ -1200,9 +1386,12 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             await self.adrop()
         await self._execute_query_async(self._prepare_scheme_query(), ddl=True)
         self._prepare_queries_after_schema()
-        if self.config.hybrid_search_enabled:
+        if self.config.hybrid_search_enabled or self.config.fulltext_index_enabled:
             try:
-                await self._ensure_hybrid_indexes()
+                if self.config.hybrid_search_enabled:
+                    await self._ensure_hybrid_indexes()
+                else:
+                    await self._ensure_fulltext_index()
             except Exception:
                 await self.aclose()
                 raise
@@ -1320,6 +1509,48 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
                 "HybridRank validation failed for the configured indexes. "
                 "Check fulltext_relevance, the vector metric, and server support."
             ) from exc
+
+    async def _ensure_fulltext_index(self) -> None:
+        self._validate_fulltext_settings()
+        table_client = self.connection._driver.table_client
+        table_path = self._table_path()
+        indexes = (await table_client.describe_table(table_path)).indexes
+        self._check_fulltext_index(indexes)
+        reused = any(i.name == self.config.fulltext_index_name for i in indexes)
+        if not reused:
+            await self._execute_query_async(
+                self._format_add_fulltext_index_query(), ddl=True
+            )
+
+        deadline = time.monotonic() + self.config.fulltext_index_ready_timeout
+        while True:
+            indexes = (await table_client.describe_table(table_path)).indexes
+            if self._check_fulltext_index(indexes):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Fulltext index {self.config.fulltext_index_name!r} for "
+                    f"{table_path} is not ready: {self._fulltext_index_state(indexes)}"
+                )
+            await asyncio.sleep(0.5)
+
+        if reused:
+            create_query = (
+                await self._execute_query_async(
+                    f"SHOW CREATE TABLE `{self.config.table}`;"
+                )
+            )[0]["CreateQuery"]
+            self._validate_fulltext_index_type(create_query)
+            try:
+                await self._execute_query_async(
+                    self._prepare_fulltext_query(1, scored=True),
+                    params=self._fulltext_params("index"),
+                )
+            except ydb_dbapi.DatabaseError as exc:
+                raise ValueError(
+                    "The configured index cannot be used for FulltextScore. "
+                    "It must be a fulltext_relevance index."
+                ) from exc
 
     async def aadd_embeddings(
         self,
@@ -1537,6 +1768,17 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
+    def fulltext_match(self, query: str, k: int = 4) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def fulltext_search_with_score(
+        self, query: str, k: int = 4
+    ) -> list[tuple[Document, float]]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
+    def fulltext_search(self, query: str, k: int = 4) -> list[Document]:
+        raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
+
     def drop(self) -> None:
         raise NotImplementedError(_ASYNCYDB_SYNC_MSG)
 
@@ -1556,6 +1798,44 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
             self._prepare_get_by_ids_query(), params=params
         )
         return self._docs_by_input_order(res, id_list)
+
+    async def afulltext_match(self, query: str, k: int = 4) -> list[Document]:
+        self._require_fulltext_index()
+        rows = await self._execute_query_async(
+            self._prepare_fulltext_query(k, scored=False),
+            params=self._fulltext_params(query),
+        )
+        return [
+            Document(
+                page_content=row["document"],
+                metadata=self._parse_metadata(row["metadata"]),
+                id=row["id"],
+            )
+            for row in rows
+        ]
+
+    async def afulltext_search_with_score(
+        self, query: str, k: int = 4
+    ) -> list[tuple[Document, float]]:
+        self._require_fulltext_index()
+        rows = await self._execute_query_async(
+            self._prepare_fulltext_query(k, scored=True),
+            params=self._fulltext_params(query),
+        )
+        return [
+            (
+                Document(
+                    page_content=row["document"],
+                    metadata=self._parse_metadata(row["metadata"]),
+                    id=row["id"],
+                ),
+                row["score"],
+            )
+            for row in rows
+        ]
+
+    async def afulltext_search(self, query: str, k: int = 4) -> list[Document]:
+        return [doc for doc, _ in await self.afulltext_search_with_score(query, k)]
 
     async def asimilarity_search(
         self,
@@ -1693,5 +1973,26 @@ class YDBHybridRetriever(BaseRetriever):
         self, query: str, *, run_manager: Any, **kwargs: Any
     ) -> list[Document]:
         return await self.vectorstore.ahybrid_search(
+            query, **(self.search_kwargs | kwargs)
+        )
+
+
+class YDBFullTextRetriever(BaseRetriever):
+    """LangChain retriever ordered by YDB fulltext BM25 relevance."""
+
+    vectorstore: Union[YDB, AsyncYDB]
+    search_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: Any, **kwargs: Any
+    ) -> list[Document]:
+        return self.vectorstore.fulltext_search(
+            query, **(self.search_kwargs | kwargs)
+        )
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: Any, **kwargs: Any
+    ) -> list[Document]:
+        return await self.vectorstore.afulltext_search(
             query, **(self.search_kwargs | kwargs)
         )

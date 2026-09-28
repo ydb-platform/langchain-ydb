@@ -1,3 +1,5 @@
+* Add standalone fulltext search and BM25 retrievers for YDB vector stores
+
 ## 0.1.0 ##
 * Add native YDB hybrid search and retrievers for new and existing vector stores
 

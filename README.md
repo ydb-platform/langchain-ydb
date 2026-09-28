@@ -122,12 +122,19 @@ Index creation settings affect a new or rebuilt vector index. Opening a table
 with a ready index does not change that index. Adding documents rebuilds the
 vector index when `index_enabled` or `hybrid_search_enabled` is set.
 
+#### Fulltext index setup
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `fulltext_index_enabled` | `False` | Create or reuse a `fulltext_relevance` index on the document column without requiring a vector index. |
+| `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name, also used by hybrid search. Set it to an existing index name to reuse that index. |
+| `fulltext_index_ready_timeout` | `3600.0` seconds | Maximum wait for a standalone fulltext index to become ready while opening the store. |
+
 #### Hybrid index setup
 
 | Field | Default | Purpose |
 | --- | --- | --- |
 | `hybrid_search_enabled` | `False` | Enable hybrid search and create any missing fulltext and vector indexes when opening a new or existing table. Implies indexed vector search even if `index_enabled=False`. |
-| `fulltext_index_name` | `"ydb_fulltext_index"` | Fulltext relevance index name. Set it to an existing index name to reuse that index. |
 | `hybrid_index_ready_timeout` | `3600.0` seconds | Maximum wait for both indexes to become ready after creation. If a build stays incomplete, opening the store raises `TimeoutError` with the current index states. Increase it for large existing tables. |
 
 #### How to use Credentials
@@ -332,6 +339,39 @@ results = retriever.invoke(
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
 ```
+
+## Fulltext search
+
+YDB also supports independent fulltext retrieval through a
+[`fulltext_relevance` index](https://ydb.tech/docs/en/yql/reference/syntax/select/fulltext_index?version=main).
+Set `fulltext_index_enabled=True` to create a missing index on the document
+column when opening a new or existing table. This does not create a vector
+index. A store with `hybrid_search_enabled=True` already has the required
+fulltext index, so it can use these methods without the extra setting.
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_ydb.vectorstores import YDB, YDBSettings
+
+store = YDB(
+    OpenAIEmbeddings(),
+    config=YDBSettings(table="my_documents", fulltext_index_enabled=True),
+)
+store.add_texts(["YDB supports fulltext search", "Vectors compare embeddings"])
+
+matches = store.fulltext_match("YDB")  # FulltextMatch; no relevance ordering
+documents = store.fulltext_search("YDB")  # ordered by BM25 relevance
+scored = store.fulltext_search_with_score("YDB")  # (Document, raw BM25 score)
+retriever = store.as_fulltext_retriever(k=4)
+documents = retriever.invoke("YDB")
+```
+
+The same API is available as `afulltext_match`, `afulltext_search`, and
+`afulltext_search_with_score` on `AsyncYDB`. The fulltext query itself does not
+compute embeddings; the `YDB` constructor still accepts an embedding model
+because it is a LangChain `VectorStore`. `fulltext_match` returns matches without
+a guaranteed order, while `fulltext_search` uses `FulltextScore` for BM25
+ranking. The fulltext index is maintained automatically on later writes.
 
 ## Hybrid search
 
