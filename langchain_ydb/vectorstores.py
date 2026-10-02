@@ -320,9 +320,20 @@ class _YDBStoreBase:
     def _table_path(self) -> str:
         return f"{self.config.database.rstrip('/')}/{self.config.table.lstrip('/')}"
 
-    def _validate_hybrid_settings(self) -> None:
-        if self.config.index_name == self.config.fulltext_index_name:
+    def _validate_index_names(self) -> None:
+        vector_enabled = self.config.index_enabled or self.config.hybrid_search_enabled
+        fulltext_enabled = (
+            self.config.fulltext_index_enabled or self.config.hybrid_search_enabled
+        )
+        if (
+            vector_enabled
+            and fulltext_enabled
+            and self.config.index_name == self.config.fulltext_index_name
+        ):
             raise ValueError("Vector and fulltext index names must be different.")
+
+    def _validate_hybrid_settings(self) -> None:
+        self._validate_index_names()
         if (
             not math.isfinite(self.config.hybrid_index_ready_timeout)
             or self.config.hybrid_index_ready_timeout <= 0
@@ -376,7 +387,7 @@ class _YDBStoreBase:
     def _validate_fulltext_index_type(self, create_query: str) -> None:
         name = re.escape(self.config.fulltext_index_name)
         pattern = (
-            rf"INDEX\s+`{name}`\s+GLOBAL(?:\s+SYNC)?"
+            rf"INDEX\s+`{name}`\s+GLOBAL(?:\s+(?:SYNC|ASYNC))?"
             r"\s+USING\s+fulltext_relevance\b"
         )
         if not re.search(pattern, create_query, flags=re.IGNORECASE):
@@ -686,6 +697,7 @@ class YDB(_YDBStoreBase, VectorStore):
         assert self.config.host and self.config.port
         assert self.config.database and self.config.table
         assert self.config.column_map and self.config.strategy
+        self._validate_index_names()
 
         self.sort_order = (
             "DESC" if self.config.strategy.endswith("Similarity") else "ASC"
@@ -742,6 +754,7 @@ class YDB(_YDBStoreBase, VectorStore):
     def update_vector_index_if_needed(self) -> None:
         if not (self.config.index_enabled or self.config.hybrid_search_enabled):
             return
+        self._validate_index_names()
 
         logger.info("Updating vector index...")
 
@@ -1367,6 +1380,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
         assert self.config.host and self.config.port
         assert self.config.database and self.config.table
         assert self.config.column_map and self.config.strategy
+        self._validate_index_names()
         self.sort_order = (
             "DESC" if self.config.strategy.endswith("Similarity") else "ASC"
         )
@@ -1446,6 +1460,7 @@ class AsyncYDB(_YDBStoreBase, VectorStore):
     async def update_vector_index_if_needed(self) -> None:
         if not (self.config.index_enabled or self.config.hybrid_search_enabled):
             return
+        self._validate_index_names()
 
         logger.info("Updating vector index...")
 

@@ -2,10 +2,128 @@
 
 import pytest
 import ydb
+import ydb_dbapi
 
 from langchain_ydb.vectorstores import YDB, AsyncYDB, YDBSettings
 
 from .fake_embeddings import ConsistentFakeEmbeddings
+
+
+@pytest.mark.parametrize(
+    "enabled_modes",
+    [
+        {"index_enabled": True, "fulltext_index_enabled": True},
+        {"hybrid_search_enabled": True},
+    ],
+)
+def test_reject_colliding_index_names_before_connect(
+    monkeypatch: pytest.MonkeyPatch, enabled_modes: dict
+) -> None:
+    def unexpected_connect(**kwargs: object) -> None:
+        raise AssertionError("YDB connection must not be opened")
+
+    monkeypatch.setattr(ydb_dbapi, "connect", unexpected_connect)
+    config = YDBSettings(
+        index_name="shared_index", fulltext_index_name="shared_index", **enabled_modes
+    )
+    with pytest.raises(ValueError, match="index names must be different"):
+        YDB(ConsistentFakeEmbeddings(), config=config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "enabled_modes",
+    [
+        {"index_enabled": True, "fulltext_index_enabled": True},
+        {"hybrid_search_enabled": True},
+    ],
+)
+async def test_async_reject_colliding_index_names_before_connect(
+    monkeypatch: pytest.MonkeyPatch, enabled_modes: dict
+) -> None:
+    async def unexpected_connect(**kwargs: object) -> None:
+        raise AssertionError("YDB connection must not be opened")
+
+    monkeypatch.setattr(ydb_dbapi, "async_connect", unexpected_connect)
+    config = YDBSettings(
+        index_name="shared_index", fulltext_index_name="shared_index", **enabled_modes
+    )
+    with pytest.raises(ValueError, match="index names must be different"):
+        await AsyncYDB.create(ConsistentFakeEmbeddings(), config=config)
+
+
+def test_vector_rebuild_rejects_later_index_name_collision() -> None:
+    config = YDBSettings(index_enabled=True, fulltext_index_enabled=True)
+    config.fulltext_index_name = config.index_name
+    store = object.__new__(YDB)
+    store.config = config
+    with pytest.raises(ValueError, match="index names must be different"):
+        store.update_vector_index_if_needed()
+
+
+@pytest.mark.asyncio
+async def test_async_vector_rebuild_rejects_later_index_name_collision() -> None:
+    config = YDBSettings(index_enabled=True, fulltext_index_enabled=True)
+    config.fulltext_index_name = config.index_name
+    store = object.__new__(AsyncYDB)
+    store.config = config
+    with pytest.raises(ValueError, match="index names must be different"):
+        await store.update_vector_index_if_needed()
+
+
+@pytest.mark.parametrize("mode", ["GLOBAL", "GLOBAL SYNC", "GLOBAL ASYNC"])
+def test_reused_fulltext_index_type_accepts_global_modes(mode: str) -> None:
+    store = object.__new__(YDB)
+    store.config = YDBSettings(fulltext_index_name="custom_fulltext")
+    store._validate_fulltext_index_type(
+        "CREATE TABLE docs ("
+        f"INDEX `custom_fulltext` {mode} USING fulltext_relevance "
+        "ON (`document`));"
+    )
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_reject_invalid_fulltext_index_ready_timeout(timeout: float) -> None:
+    store = object.__new__(YDB)
+    store.config = YDBSettings(fulltext_index_ready_timeout=timeout)
+    with pytest.raises(ValueError, match="fulltext_index_ready_timeout"):
+        store._validate_fulltext_settings()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["fulltext_match", "fulltext_search", "fulltext_search_with_score"],
+)
+def test_fulltext_methods_require_index_flag(method_name: str) -> None:
+    store = object.__new__(YDB)
+    store.config = YDBSettings()
+    with pytest.raises(ValueError, match="fulltext_index_enabled"):
+        getattr(store, method_name)("query")
+
+
+def test_fulltext_retriever_requires_index_flag() -> None:
+    store = object.__new__(YDB)
+    store.config = YDBSettings()
+    with pytest.raises(ValueError, match="fulltext_index_enabled"):
+        store.as_fulltext_retriever()
+
+
+@pytest.mark.asyncio
+async def test_async_fulltext_requires_index_flag() -> None:
+    store = object.__new__(AsyncYDB)
+    store.config = YDBSettings()
+    with pytest.raises(ValueError, match="fulltext_index_enabled"):
+        await store.afulltext_search("query")
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["fulltext_match", "fulltext_search", "fulltext_search_with_score"],
+)
+def test_async_store_rejects_sync_fulltext_methods(method_name: str) -> None:
+    store = object.__new__(AsyncYDB)
+    with pytest.raises(NotImplementedError, match="await afulltext"):
+        getattr(store, method_name)("query")
 
 
 @pytest.mark.parametrize("custom_columns", [False, True])
