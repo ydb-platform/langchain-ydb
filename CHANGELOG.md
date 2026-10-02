@@ -1,3 +1,4 @@
+## 0.2.0 ##
 * Add standalone fulltext search and BM25 retrievers for YDB vector stores
 
 ## 0.1.0 ##
